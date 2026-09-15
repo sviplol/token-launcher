@@ -18,6 +18,7 @@ import gzip
 import json
 import logging
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -995,7 +996,147 @@ def enable_dev_mode() -> tuple:
 # 指向本地中转后，计费路径的 token 由 Key 池替换，其余透传。
 
 WORKBUDDY_SETTINGS_PATH = os.path.expanduser("~/.workbuddy/settings.json")
+# .codebuddy 的 settings.json 与 .workbuddy 同构，CLI 可能读任一目录，两个都写（提示词要求）
+CODEBUDDY_DOT_SETTINGS_PATH = os.path.expanduser("~/.codebuddy/settings.json")
 WB_ENV_KEY = "CODEBUDDY_BASE_URL"
+
+# ============ 媒体链路 CLI patch（2026-09-15，照抄一键部署工具验证过的方案） ============
+# WorkBuddy 图片/视频生成走独立链路（ImageServiceImpl/VideoServiceImpl），
+# 不看 models.json（聊天才看）。需要 patch CLI 双文件的 prepareRequest，
+# 让媒体请求读 WB_MEDIA_URL env（幂等开关：env存在走中转，不存在走官方）。
+
+# CLI 双文件路径（两个都要patch，加载哪个取决于 CODEBUDDY_FORCE_HEADLESS_BUNDLE）
+if _sys.platform == "win32":
+    _pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    CLI_FILES = [
+        os.path.join(_pf, "WorkBuddy", "resources", "app.asar.unpacked", "cli", "dist", "codebuddy-headless.js"),
+        os.path.join(_pf, "WorkBuddy", "resources", "app.asar.unpacked", "cli", "dist", "codebuddy.js"),
+    ]
+elif _sys.platform == "darwin":
+    CLI_FILES = [
+        "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/dist/codebuddy-headless.js",
+        "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/dist/codebuddy.js",
+    ]
+else:
+    CLI_FILES = []
+
+# 原生 prepareRequest（在 CLI 里恰好出现2次：ImageServiceImpl/VideoServiceImpl 各一处）
+CLI_NATIVE_SNIPPET = (
+    'async prepareRequest(){let eA=this.authenticationManager.currentSessionSubject.getValue()?.auth;'
+    'if(!eA?.accessToken)throw Error("Authentication required. Please login first.");'
+    'let el=(await this.productManager.waitConfiguration()).endpoint;'
+    'if(!el)throw Error("Base endpoint not configured.");return{auth:eA,endpoint:el}}'
+)
+# patch 后版本：WB_MEDIA_URL 存在→走它+用WB_MEDIA_KEY；不存在→官方原逻辑（零影响）
+CLI_PATCHED_SNIPPET = (
+    'async prepareRequest(){let eN=process.env.WB_MEDIA_URL;if(eN){'
+    'let eK=process.env.WB_MEDIA_KEY||"";'
+    'if(!eK){try{let _s=JSON.parse(require("fs").readFileSync(require("os").homedir()+"/.workbuddy/settings.json","utf8"));'
+    'eK=(_s.env&&_s.env.WB_MEDIA_KEY)||""}catch(e){}}'
+    'let eA2=eK?{accessToken:eK}:this.authenticationManager.currentSessionSubject.getValue()?.auth;'
+    'if(!eA2?.accessToken)throw Error("Authentication required. Please login first.");'
+    'return{auth:eA2,endpoint:eN.replace(/\\/$/,"")}}'
+    'let eA=this.authenticationManager.currentSessionSubject.getValue()?.auth;'
+    'if(!eA?.accessToken)throw Error("Authentication required. Please login first.");'
+    'let el=(await this.productManager.waitConfiguration()).endpoint;'
+    'if(!el)throw Error("Base endpoint not configured.");return{auth:eA,endpoint:el}}'
+)
+
+
+def _load_json_file(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_json_file_atomic(path: str, data: dict):
+    """原子写 JSON（首次先备份，不破坏其他字段）"""
+    d = os.path.dirname(path)
+    if d and not os.path.isdir(d):
+        os.makedirs(d, exist_ok=True)
+    bak = path + ".bak-antigravity"
+    if not os.path.exists(bak) and os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = f.read()
+            with open(bak, "w", encoding="utf-8") as f:
+                f.write(raw)
+        except OSError as e:
+            logger.warning(f"[媒体链路] 备份 {os.path.basename(path)} 失败: {e}")
+    tmp = path + ".tmp-antigravity"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def cli_patch_status() -> dict:
+    """检测 CLI 双文件的 patch 状态（GUI展示+一键修复用）"""
+    result = {"files": [], "all_patched": True, "any_exists": False}
+    for fp in CLI_FILES:
+        exists = os.path.exists(fp)
+        patched = False
+        if exists:
+            result["any_exists"] = True
+            try:
+                with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                    c = f.read()
+                patched = "process.env.WB_MEDIA_URL" in c
+            except OSError:
+                pass
+        if not (exists and patched):
+            result["all_patched"] = False
+        result["files"].append({"path": fp, "exists": exists, "patched": patched})
+    return result
+
+
+def patch_cli_files() -> tuple:
+    """patch CLI 双文件（幂等：已patch跳过；原生串必须恰好2次，不是2次中止防误伤）
+
+    WorkBuddy 升级会还原这两个文件 → 调用方可定期用 cli_patch_status() 检测，
+    缺失则重新调本函数（一键修复）。
+    """
+    if not CLI_FILES:
+        return False, "当前平台不支持 CLI patch"
+    patched_count = 0
+    for fp in CLI_FILES:
+        if not os.path.exists(fp):
+            logger.warning(f"[媒体patch] 文件不存在，跳过: {fp}")
+            continue
+        try:
+            with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+        except OSError as e:
+            return False, f"读取失败: {os.path.basename(fp)}: {e}"
+        if "process.env.WB_MEDIA_URL" in content:
+            patched_count += 1
+            continue  # 已patch（我们或一键部署工具打的，幂等跳过）
+        n_native = content.count(CLI_NATIVE_SNIPPET)
+        if n_native != 2:
+            # 不是2次说明版本变了或已被改过，中止防误伤
+            return False, (f"{os.path.basename(fp)} 原生代码出现{n_native}次(应为2)，"
+                           f"疑似版本更新，为防误伤已中止")
+        # 备份原文件（.orig放同目录，跟一键部署工具惯例一致）
+        orig = fp + ".orig"
+        if not os.path.exists(orig):
+            try:
+                shutil.copy2(fp, orig)
+            except OSError as e:
+                return False, f"备份失败: {e}"
+        new_content = content.replace(CLI_NATIVE_SNIPPET, CLI_PATCHED_SNIPPET)
+        try:
+            tmp = fp + ".tmp-patch"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(new_content)
+            os.replace(tmp, fp)
+        except OSError as e:
+            return False, f"写入失败: {os.path.basename(fp)}: {e}"
+        patched_count += 1
+        logger.info(f"[媒体patch] {os.path.basename(fp)} patch成功(2处→走WB_MEDIA_URL)")
+    if patched_count == 0:
+        return False, "未找到可patch的CLI文件（WorkBuddy未安装？）"
+    return True, f"CLI patch完成({patched_count}/2文件)"
 
 
 def is_workbuddy_installed() -> bool:
@@ -1034,11 +1175,14 @@ def get_workbuddy_config_state(port: int) -> dict:
     env = settings.get("env") or {}
     base_url = env.get(WB_ENV_KEY, "")
     media_url = env.get(WB_MEDIA_URL_KEY, "")
+    cli = cli_patch_status()
     return {
         "base_url": base_url,
         "pointed_to_us": base_url == f"http://127.0.0.1:{port}",
         "media_url": media_url,
         "media_pointed_to_us": media_url == f"http://127.0.0.1:{port}",
+        "cli_patched": cli["all_patched"],
+        "cli_files": cli["files"],
         "settings_exists": os.path.exists(WORKBUDDY_SETTINGS_PATH),
     }
 
@@ -1047,29 +1191,76 @@ WB_MEDIA_URL_KEY = "WB_MEDIA_URL"
 WB_MEDIA_KEY_KEY = "WB_MEDIA_KEY"
 
 
-def apply_workbuddy_config(port: int) -> tuple:
-    """把 WorkBuddy 的 CLI API 根地址指向本地中转（新会话生效，不用重启）
-
-    ★2026-09-15新增媒体链路：同时写 WB_MEDIA_URL（图片/视频生成走中转）。
-    前提：WorkBuddy CLI 已被patch（读WB_MEDIA_URL env，幂等开关）——
-    未patch的旧客户端无此env读取逻辑，媒体继续走官方（兼容无影响）。
-    WB_MEDIA_KEY 留空：patch里key为空时回退settings.json读取，也为空→
-    用官方登录态的accessToken——但中转对计费路径会强制换Key池token，所以无影响。
-    """
+def _write_media_env_to_settings(path: str, port: int) -> bool:
+    """把聊天+媒体端点写进指定 settings.json（合并env段，不覆盖其他字段）"""
+    data = _load_json_file(path)
+    env = data.get("env")
+    if not isinstance(env, dict):
+        env = {}
+    env[WB_ENV_KEY] = f"http://127.0.0.1:{port}"
+    env[WB_MEDIA_URL_KEY] = f"http://127.0.0.1:{port}"
+    data["env"] = env
     try:
-        settings = _load_wb_settings()
-        env = settings.get("env")
-        if not isinstance(env, dict):
-            env = {}
-        env[WB_ENV_KEY] = f"http://127.0.0.1:{port}"
-        env[WB_MEDIA_URL_KEY] = f"http://127.0.0.1:{port}"
-        settings["env"] = env
-        _save_wb_settings(settings)
-        logger.info(f"[WorkBuddy配置] CODEBUDDY_BASE_URL + WB_MEDIA_URL 已指向 http://127.0.0.1:{port}（聊天+图片+视频全部走中转）")
-        return True, "已写入，WorkBuddy 新会话生效（聊天+图片+视频）"
+        _save_json_file_atomic(path, data)
+        return True
     except OSError as e:
-        logger.error(f"[WorkBuddy配置] 写入 settings.json 失败: {e}")
-        return False, f"写入失败: {e}"
+        logger.warning(f"[媒体链路] 写入 {path} 失败: {e}")
+        return False
+
+
+def _clear_media_env_from_settings(path: str) -> bool:
+    """从指定 settings.json 删除本功能写入的端点键（保留其他工具的键如WB_MEDIA_KEY）"""
+    data = _load_json_file(path)
+    env = data.get("env")
+    changed = False
+    if isinstance(env, dict):
+        for k in (WB_ENV_KEY, WB_MEDIA_URL_KEY):
+            if env.get(k) and env[k].startswith("http://127.0.0.1:"):
+                del env[k]
+                changed = True
+        if changed:
+            if not env:
+                data.pop("env", None)
+            else:
+                data["env"] = env
+            try:
+                _save_json_file_atomic(path, data)
+            except OSError as e:
+                logger.warning(f"[媒体链路] 还原 {path} 失败: {e}")
+                return False
+    return changed
+
+
+def apply_workbuddy_config(port: int) -> tuple:
+    """把 WorkBuddy 的聊天+媒体端点全部指向本地中转（新会话生效，不用重启）
+
+    ★2026-09-15 媒体链路完整三件套（照抄一键部署工具验证过的方案）：
+    1. settings.json env段写 WB_MEDIA_URL —— .workbuddy 和 .codebuddy 两个目录都写
+    2. patch CLI 双文件（codebuddy-headless.js + codebuddy.js）的 prepareRequest ——
+       ImageServiceImpl/VideoServiceImpl 读 WB_MEDIA_URL 走中转（幂等开关）
+    3. WB_MEDIA_KEY 不写（留空）—— patch 里 key 为空时回退官方登录态 accessToken，
+       中转对计费路径会强制换 Key 池 token，所以无影响
+    停止接入时删端点键（媒体回官方），CLI patch 保留（幂等无副作用，WorkBuddy升级还原后
+    下次启动接入自动重打）。
+    """
+    # 1. 写 settings.json 双目录
+    ok_wb = _write_media_env_to_settings(WORKBUDDY_SETTINGS_PATH, port)
+    ok_cb = True
+    if os.path.isdir(os.path.expanduser("~/.codebuddy")):
+        ok_cb = _write_media_env_to_settings(CODEBUDDY_DOT_SETTINGS_PATH, port)
+    if not ok_wb:
+        return False, "写入 settings.json 失败"
+    # 2. patch CLI 双文件（幂等）
+    patch_ok, patch_msg = patch_cli_files()
+    if not patch_ok:
+        logger.warning(f"[媒体链路] CLI patch未完成: {patch_msg}（聊天走中转正常，媒体可能走官方）")
+    else:
+        logger.info(f"[媒体链路] {patch_msg}")
+    logger.info(f"[WorkBuddy配置] 聊天+媒体端点已指向 http://127.0.0.1:{port}（settings双目录）")
+    msg = "已写入，WorkBuddy 新会话生效（聊天+图片+视频全部走中转）"
+    if not patch_ok:
+        msg += f"；注意: CLI patch未完成（{patch_msg}），图片/视频可能仍走官方"
+    return True, msg
 
 
 def restore_workbuddy_config(restart_wb: bool = True) -> tuple:
@@ -1082,19 +1273,11 @@ def restore_workbuddy_config(restart_wb: bool = True) -> tuple:
     杀掉 WorkBuddy 让它下次启动重读 settings 才是真正的断开。
     """
     try:
-        settings = _load_wb_settings()
-        env = settings.get("env")
-        changed = False
-        if isinstance(env, dict):
-            for k in (WB_ENV_KEY, WB_MEDIA_URL_KEY):
-                if k in env:
-                    del env[k]
-                    changed = True
-            if changed:
-                if not env:
-                    del settings["env"]
-                _save_wb_settings(settings)
-        logger.info("[WorkBuddy配置] 端点配置已还原（聊天+媒体）")
+        changed = _clear_media_env_from_settings(WORKBUDDY_SETTINGS_PATH)
+        if os.path.exists(CODEBUDDY_DOT_SETTINGS_PATH):
+            changed2 = _clear_media_env_from_settings(CODEBUDDY_DOT_SETTINGS_PATH)
+            changed = changed or changed2
+        logger.info("[WorkBuddy配置] 端点配置已还原（聊天+媒体，双目录；CLI patch保留幂等无副作用）")
         # 重启 WorkBuddy（杀旧进程，让 CLI 重读 settings.json）
         if restart_wb and changed:
             try:

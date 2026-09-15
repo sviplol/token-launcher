@@ -17,23 +17,11 @@ jobs:
       - name: Read version
         id: ver
         shell: bash
-        run: |
-          echo "version=$(cat VERSION | tr -d '[:space:]')" >> $GITHUB_OUTPUT
+        run: echo "version=$(cat VERSION | tr -d '[:space:]')" >> $GITHUB_OUTPUT
       - name: Build Windows
         shell: bash
         run: |
-          pyinstaller --onefile --windowed --name "Token接入器" \
-            --icon assets/icons/app.ico \
-            --add-data "src;src" \
-            --add-data "assets;assets" \
-            --hidden-import winotify \
-            --hidden-import winotify.audio \
-            --collect-submodules src.ui \
-            --collect-submodules src.modules \
-            --collect-submodules src.utils \
-            --collect-submodules src.i18n \
-            --collect-submodules src.models \
-            src/_entry.py
+          pyinstaller --onefile --windowed --name "Token接入器" --icon assets/icons/app.ico --add-data "src;src" --add-data "assets;assets" --hidden-import winotify --hidden-import winotify.audio --collect-submodules src.ui --collect-submodules src.modules --collect-submodules src.utils --collect-submodules src.i18n --collect-submodules src.models src/_entry.py
           cp "dist/Token接入器.exe" "dist/Token接入器_v${{ steps.ver.outputs.version }}.exe"
       - uses: actions/upload-artifact@v4
         with:
@@ -51,25 +39,14 @@ jobs:
         run: pip install PySide6 requests pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
       - name: Read version
         id: ver
-        run: |
-          echo "version=$(cat VERSION | tr -d '[:space:]')" >> $GITHUB_OUTPUT
+        run: echo "version=$(cat VERSION | tr -d '[:space:]')" >> $GITHUB_OUTPUT
       - name: Build .app
         run: |
-          pyinstaller --windowed --noconfirm \
-            --name "Token接入器" \
-            --add-data "src:src" \
-            --add-data "assets:assets" \
-            --collect-submodules src.ui \
-            --collect-submodules src.modules \
-            --collect-submodules src.utils \
-            --collect-submodules src.i18n \
-            --collect-submodules src.models \
-            src/_entry.py
+          pyinstaller --windowed --noconfirm --name "Token接入器" --add-data "src:src" --add-data "assets:assets" --collect-submodules src.ui --collect-submodules src.modules --collect-submodules src.utils --collect-submodules src.i18n --collect-submodules src.models src/_entry.py
       - name: Create DMG
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
-          DMG_NAME="Token接入器_M_v${VERSION}.dmg"
-          hdiutil create -volname "Token接入器" -srcfolder "dist/Token接入器.app" -ov -format UDZO "$DMG_NAME"
+          hdiutil create -volname "Token接入器" -srcfolder "dist/Token接入器.app" -ov -format UDZO "Token接入器_M_v${VERSION}.dmg"
       - uses: actions/upload-artifact@v4
         with:
           name: Mac-M芯片-Token接入器_v${{ steps.ver.outputs.version }}
@@ -86,25 +63,14 @@ jobs:
         run: pip install PySide6 requests pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
       - name: Read version
         id: ver
-        run: |
-          echo "version=$(cat VERSION | tr -d '[:space:]')" >> $GITHUB_OUTPUT
+        run: echo "version=$(cat VERSION | tr -d '[:space:]')" >> $GITHUB_OUTPUT
       - name: Build .app
         run: |
-          pyinstaller --windowed --noconfirm \
-            --name "Token接入器-Intel" \
-            --add-data "src:src" \
-            --add-data "assets:assets" \
-            --collect-submodules src.ui \
-            --collect-submodules src.modules \
-            --collect-submodules src.utils \
-            --collect-submodules src.i18n \
-            --collect-submodules src.models \
-            src/_entry.py
+          pyinstaller --windowed --noconfirm --name "Token接入器-Intel" --add-data "src:src" --add-data "assets:assets" --collect-submodules src.ui --collect-submodules src.modules --collect-submodules src.utils --collect-submodules src.i18n --collect-submodules src.models src/_entry.py
       - name: Create DMG
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
-          DMG_NAME="Token接入器_Intel_v${VERSION}.dmg"
-          hdiutil create -volname "Token接入器-Intel" -srcfolder "dist/Token接入器-Intel.app" -ov -format UDZO "$DMG_NAME"
+          hdiutil create -volname "Token接入器-Intel" -srcfolder "dist/Token接入器-Intel.app" -ov -format UDZO "Token接入器_Intel_v${VERSION}.dmg"
       - uses: actions/upload-artifact@v4
         with:
           name: Mac-英特尔-Token接入器_v${{ steps.ver.outputs.version }}
