@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 
-from .main_window import MainWindow
+from .main_window import MainWindow, VERSION
 from .utils.store import save_setting, load_setting
 
 
@@ -183,12 +183,13 @@ def _check_single_instance() -> bool:
 _single_instance_server = None
 
 
-def _check_remote_disabled() -> bool:
-    """启动时检查服务器端的客户端禁用开关。
+def _check_remote_disabled() -> dict:
+    """启动时查询服务器端客户端状态（禁用开关 + 强制更新最低版本）。
 
-    返回 True=已禁用（应阻止启动）。
+    返回 {'disabled': bool, 'min_version': str}。
     服务器不可达/超时=放行（不能因网络问题挡住所有用户）。
     """
+    result = {"disabled": False, "min_version": ""}
     try:
         import json as _json
         import urllib.request as _rq
@@ -202,9 +203,65 @@ def _check_remote_disabled() -> bool:
         )
         with _rq.urlopen(req, timeout=3, context=ctx) as resp:
             data = _json.loads(resp.read().decode("utf-8", errors="replace"))
-        return bool(data.get("ok")) and bool(data.get("disabled"))
+        if data.get("ok"):
+            result["disabled"] = bool(data.get("disabled"))
+            result["min_version"] = str(data.get("min_version") or "").strip()
+    except Exception:
+        pass
+    return result
+
+
+def _version_tuple(v: str):
+    parts = []
+    for seg in v.split("."):
+        try:
+            parts.append(int(seg))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
+def _need_force_update(current: str, min_ver: str) -> bool:
+    """当前版本低于服务器要求的最低版本 → 需要强制更新"""
+    if not min_ver:
+        return False
+    try:
+        return _version_tuple(current) < _version_tuple(min_ver)
     except Exception:
         return False
+
+
+UPDATE_URL = "https://2bbb.lanzout.com/b04oxedod"
+
+
+def _show_force_update_dialog(min_ver: str):
+    """强制更新弹窗（模态，无法关闭——必须更新才能继续）"""
+    from PySide6.QtWidgets import QMessageBox, QPushButton
+    msg = QMessageBox()
+    msg.setIcon(QMessageBox.Warning)
+    msg.setWindowTitle("发现新版本")
+    msg.setText(
+        f"当前版本已停用，请更新到最新版本后使用。\n\n"
+        f"当前版本: v{VERSION}\n"
+        f"要求版本: v{min_ver} 及以上\n\n"
+        f"下载地址（密码 9ed0）：\n{UPDATE_URL}"
+    )
+    btn_open = QPushButton("打开下载页")
+    btn_copy = QPushButton("复制下载地址")
+    msg.addButton(btn_open, QMessageBox.AcceptRole)
+    msg.addButton(btn_copy, QMessageBox.ActionRole)
+    msg.addButton(QMessageBox.Close)
+    while True:
+        clicked = msg.exec()
+        if msg.clickedButton() is btn_open:
+            import webbrowser
+            webbrowser.open(UPDATE_URL)
+            continue
+        if msg.clickedButton() is btn_copy:
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setText(UPDATE_URL)
+            continue
+        break  # Close按钮或关闭窗口 → 退出程序
 
 
 def _cleanup_stale_relay_config():
@@ -271,8 +328,9 @@ def main():
     app.setApplicationName("Token接入器")
     app.setOrganizationName("Antigravity")
 
-    # 远程禁用检查（服务器开关，最初始阶段拦截）
-    if _check_remote_disabled():
+    # 远程状态检查（禁用开关 + 强制更新版本，最初始阶段拦截）
+    remote_status = _check_remote_disabled()
+    if remote_status["disabled"]:
         logger.warning("远程禁用开关已开启，阻止启动")
         from PySide6.QtWidgets import QMessageBox
         msg = QMessageBox()
@@ -281,6 +339,11 @@ def main():
         msg.setText("该版本已过期，请联系管理员。")
         msg.setStandardButtons(QMessageBox.Ok)
         msg.exec()
+        sys.exit(0)
+    if _need_force_update(VERSION, remote_status["min_version"]):
+        logger.warning(f"版本过低被强制更新: 当前v{VERSION} < 要求v{remote_status['min_version']}")
+        from PySide6.QtWidgets import QApplication as _QApp
+        _show_force_update_dialog(remote_status["min_version"])
         sys.exit(0)
 
     # 单实例检查（文件锁 + QLocalServer唤醒）
