@@ -1095,7 +1095,8 @@ class HotSwitchPage(QWidget):
                 wb = get_workbuddy_config_state(port)
             wb_url = wb["base_url"] or "官方默认"
             wb_ok = "✅" if wb["pointed_to_us"] else "⚠️"
-            _set_multiline_text(self._wb_label, f"{wb_ok} 当前端点: {wb_url}")
+            media_ok = "✅" if wb.get("media_pointed_to_us") else "⚠️"
+            _set_multiline_text(self._wb_label, f"{wb_ok} 聊天端点: {wb_url}\n{media_ok} 图片/视频: {'已接管' if wb.get('media_pointed_to_us') else '未接管'}")
             self._wb_btn.setText(
                 "🔌 断开 WorkBuddy" if wb["pointed_to_us"] else "🔗 接入 WorkBuddy")
         except Exception:

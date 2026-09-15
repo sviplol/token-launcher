@@ -229,10 +229,12 @@ def _cleanup_stale_relay_config():
         )
         if is_workbuddy_installed():
             state = get_workbuddy_config_state(int(port))
-            if state["pointed_to_us"]:
+            # 检查聊天端点或媒体端点任一指向本地中转
+            stale = state["pointed_to_us"] or state.get("media_url", "").startswith("http://127.0.0.1:")
+            if stale:
                 restore_workbuddy_config(restart_wb=True)
                 logging.getLogger(__name__).info(
-                    "[启动清理] 检测到 WorkBuddy 残留端点配置，已清理并重启 WorkBuddy")
+                    "[启动清理] 检测到 WorkBuddy 残留端点配置（聊天或媒体），已清理并重启 WorkBuddy")
         if is_codebuddy_installed():
             # CodeBuddy 残余配置同样清理
             restore_client_config()

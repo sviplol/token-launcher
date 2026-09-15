@@ -45,10 +45,16 @@ SWAP_PATHS_EXACT = {
     "/v2/completions",
     "/v2/agents",
     "/v2/embeddings",
+    # 媒体链路（2026-09-15新增：图片/视频生成走中转，CLI的WB_MEDIA_URL patch指向本地8003）
+    "/v2/images/generations",
+    "/v2/images/edits",
+    "/v2/videos/generations",
 }
 # 需要替换 token 的计费路径（前缀匹配）
 SWAP_PATHS_PREFIX = (
     "/v2/chat/queue/",
+    # 视频任务轮询（高频POST，也计费）
+    "/v2/videos/tasks",
 )
 
 # WorkBuddy 内嵌 CLI 的 OpenAI 客户端把 CODEBUDDY_BASE_URL 原样当 baseURL
@@ -1025,26 +1031,42 @@ def _save_wb_settings(data: dict):
 def get_workbuddy_config_state(port: int) -> dict:
     """读取 WorkBuddy 当前配置状态（GUI 展示用）"""
     settings = _load_wb_settings()
-    base_url = (settings.get("env") or {}).get(WB_ENV_KEY, "")
+    env = settings.get("env") or {}
+    base_url = env.get(WB_ENV_KEY, "")
+    media_url = env.get(WB_MEDIA_URL_KEY, "")
     return {
         "base_url": base_url,
         "pointed_to_us": base_url == f"http://127.0.0.1:{port}",
+        "media_url": media_url,
+        "media_pointed_to_us": media_url == f"http://127.0.0.1:{port}",
         "settings_exists": os.path.exists(WORKBUDDY_SETTINGS_PATH),
     }
 
 
+WB_MEDIA_URL_KEY = "WB_MEDIA_URL"
+WB_MEDIA_KEY_KEY = "WB_MEDIA_KEY"
+
+
 def apply_workbuddy_config(port: int) -> tuple:
-    """把 WorkBuddy 的 CLI API 根地址指向本地中转（新会话生效，不用重启）"""
+    """把 WorkBuddy 的 CLI API 根地址指向本地中转（新会话生效，不用重启）
+
+    ★2026-09-15新增媒体链路：同时写 WB_MEDIA_URL（图片/视频生成走中转）。
+    前提：WorkBuddy CLI 已被patch（读WB_MEDIA_URL env，幂等开关）——
+    未patch的旧客户端无此env读取逻辑，媒体继续走官方（兼容无影响）。
+    WB_MEDIA_KEY 留空：patch里key为空时回退settings.json读取，也为空→
+    用官方登录态的accessToken——但中转对计费路径会强制换Key池token，所以无影响。
+    """
     try:
         settings = _load_wb_settings()
         env = settings.get("env")
         if not isinstance(env, dict):
             env = {}
         env[WB_ENV_KEY] = f"http://127.0.0.1:{port}"
+        env[WB_MEDIA_URL_KEY] = f"http://127.0.0.1:{port}"
         settings["env"] = env
         _save_wb_settings(settings)
-        logger.info(f"[WorkBuddy配置] CODEBUDDY_BASE_URL 已指向 http://127.0.0.1:{port}")
-        return True, "已写入，WorkBuddy 新会话生效"
+        logger.info(f"[WorkBuddy配置] CODEBUDDY_BASE_URL + WB_MEDIA_URL 已指向 http://127.0.0.1:{port}（聊天+图片+视频全部走中转）")
+        return True, "已写入，WorkBuddy 新会话生效（聊天+图片+视频）"
     except OSError as e:
         logger.error(f"[WorkBuddy配置] 写入 settings.json 失败: {e}")
         return False, f"写入失败: {e}"
@@ -1063,13 +1085,16 @@ def restore_workbuddy_config(restart_wb: bool = True) -> tuple:
         settings = _load_wb_settings()
         env = settings.get("env")
         changed = False
-        if isinstance(env, dict) and WB_ENV_KEY in env:
-            del env[WB_ENV_KEY]
-            changed = True
-            if not env:
-                del settings["env"]
-            _save_wb_settings(settings)
-        logger.info("[WorkBuddy配置] 端点配置已还原")
+        if isinstance(env, dict):
+            for k in (WB_ENV_KEY, WB_MEDIA_URL_KEY):
+                if k in env:
+                    del env[k]
+                    changed = True
+            if changed:
+                if not env:
+                    del settings["env"]
+                _save_wb_settings(settings)
+        logger.info("[WorkBuddy配置] 端点配置已还原（聊天+媒体）")
         # 重启 WorkBuddy（杀旧进程，让 CLI 重读 settings.json）
         if restart_wb and changed:
             try:
