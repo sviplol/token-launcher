@@ -17,6 +17,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 
 from .main_window import MainWindow
+from .utils.store import save_setting, load_setting
 
 
 # 桌面"前台"文件夹路径（每次启动自动部署最新版exe到此处）
@@ -97,15 +98,40 @@ _main_window = None
 
 
 def _force_cleanup():
-    """强制清理所有资源（atexit 和信号处理时调用）"""
+    """强制清理所有资源（atexit 和信号处理时调用）
+
+    ★2026-09-15修复3002错误：软件退出时如果中转在跑，必须停止中转+还原
+    WorkBuddy/CodeBuddy 端点配置。否则：
+    - 8003端口死了但 WorkBuddy CLI 内存里还缓存指向8003 → ECONNREFUSED
+    - 下次开软件 autostart 又拉起中转 → CLI 打过来 → 扣卡密积分（用户以为没接入）
+    """
     global _main_window
     if _main_window:
-        # 注意：不杀 WorkBuddy！它是独立应用，关闭本软件不应影响它
         # 停止代理服务器
         try:
             api_proxy_page = _main_window._pages.get("api_proxy")
             if api_proxy_page:
                 api_proxy_page._cleanup()
+        except Exception:
+            pass
+        # 停止无感换号中转 + 还原 WorkBuddy/CodeBuddy 端点
+        try:
+            hs = _main_window._pages.get("hotswitch")
+            if hs and getattr(hs, "_relay_server", None) and hs._relay_server.is_running:
+                hs._relay_server.stop()
+                hs._relay_server = None
+                save_setting("codebuddy_relay_enabled", "0")
+                save_setting("codebuddy_relay_wb_enabled", "0")
+                logger.info("[退出清理] 中转已停止，还原客户端端点配置")
+                # 还原配置（不重启WorkBuddy——软件都在退了，交给下次启动检测）
+                try:
+                    from .modules.codebuddy_relay import restore_client_config, restore_workbuddy_config, is_codebuddy_installed, is_workbuddy_installed
+                    if is_codebuddy_installed():
+                        restore_client_config()
+                    if is_workbuddy_installed():
+                        restore_workbuddy_config(restart_wb=False)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -181,12 +207,48 @@ def _check_remote_disabled() -> bool:
         return False
 
 
+def _cleanup_stale_relay_config():
+    """启动时清理残留的中转配置（2026-09-15修复3002错误）。
+
+    场景：上次退出时异常（断电/崩溃/taskkill）没走到 _force_cleanup，
+    WorkBuddy/CodeBuddy 的 settings.json 还指向 127.0.0.1:8003。
+    本次启动如果 autostart 开着会自动拉起中转还好；
+    如果用户关了 autostart 或勾了"不自动启动"，WorkBuddy 就会一直报
+    "connect ECONNREFUSED 127.0.0.1:8003"。
+    这里在启动最早期检测：settings 指向8003 且 relay_enabled=0 → 清理。
+    """
+    try:
+        if load_setting("codebuddy_relay_enabled", "0") == "1":
+            return  # 用户开着自动启动，中转马上要拉起，不动
+        port = load_setting("codebuddy_relay_port", "8003")
+        stale_url = f"http://127.0.0.1:{port}"
+        from .modules.codebuddy_relay import (
+            is_workbuddy_installed, restore_workbuddy_config,
+            is_codebuddy_installed, restore_client_config,
+            get_workbuddy_config_state,
+        )
+        if is_workbuddy_installed():
+            state = get_workbuddy_config_state(int(port))
+            if state["pointed_to_us"]:
+                restore_workbuddy_config(restart_wb=True)
+                logging.getLogger(__name__).info(
+                    "[启动清理] 检测到 WorkBuddy 残留端点配置，已清理并重启 WorkBuddy")
+        if is_codebuddy_installed():
+            # CodeBuddy 残余配置同样清理
+            restore_client_config()
+    except Exception:
+        pass  # 清理失败不阻塞启动
+
+
 def main():
     """应用入口"""
     _setup_logging()
 
     # 自动部署到桌面"前台"文件夹（替换旧版本）
     _auto_deploy_to_desktop()
+
+    # 清理上次异常退出的残留中转配置（防 WorkBuddy 报 ECONNREFUSED 3002）
+    _cleanup_stale_relay_config()
 
     # 注册 atexit 清理（即使异常退出也尝试清理）
     atexit.register(_force_cleanup)

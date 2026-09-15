@@ -20,6 +20,7 @@ import logging
 import os
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -1049,18 +1050,55 @@ def apply_workbuddy_config(port: int) -> tuple:
         return False, f"写入失败: {e}"
 
 
-def restore_workbuddy_config() -> tuple:
-    """还原 WorkBuddy 端点配置（只删本功能写入的 env 键）"""
+def restore_workbuddy_config(restart_wb: bool = True) -> tuple:
+    """还原 WorkBuddy 端点配置（只删本功能写入的 env 键）
+
+    ★restart_wb=True（默认）时重启 WorkBuddy 进程：
+    WorkBuddy 的 CLI 在启动时读取 settings.json 的 env 并缓存在内存，
+    只改文件不杀进程→运行中的 CLI 继续打 8003→中转停了就报
+    "connect ECONNREFUSED 127.0.0.1:8003"（3002错误）。
+    杀掉 WorkBuddy 让它下次启动重读 settings 才是真正的断开。
+    """
     try:
         settings = _load_wb_settings()
         env = settings.get("env")
+        changed = False
         if isinstance(env, dict) and WB_ENV_KEY in env:
             del env[WB_ENV_KEY]
+            changed = True
             if not env:
                 del settings["env"]
             _save_wb_settings(settings)
         logger.info("[WorkBuddy配置] 端点配置已还原")
-        return True, "已还原官方端点"
+        # 重启 WorkBuddy（杀旧进程，让 CLI 重读 settings.json）
+        if restart_wb and changed:
+            try:
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/IM", "WorkBuddy.exe", "/F"],
+                                   capture_output=True, timeout=10)
+                else:
+                    subprocess.run(["pkill", "-f", "WorkBuddy"],
+                                   capture_output=True, timeout=10)
+                logger.info("[WorkBuddy配置] 已停止 WorkBuddy 进程（CLI 将重读官方端点）")
+                # 延迟2秒后拉起 WorkBuddy（用户无感重启）
+                import threading
+                def _relaunch():
+                    import time as _t
+                    _t.sleep(2)
+                    try:
+                        wb_exe = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "WorkBuddy", "WorkBuddy.exe")
+                        if sys.platform != "win32":
+                            wb_exe = "/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy"
+                        if os.path.exists(wb_exe):
+                            subprocess.Popen([wb_exe], start_new_session=True,
+                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            logger.info("[WorkBuddy配置] WorkBuddy 已重新启动（官方端点）")
+                    except OSError as e:
+                        logger.warning(f"[WorkBuddy配置] 重启 WorkBuddy 失败: {e}")
+                threading.Thread(target=_relaunch, daemon=True).start()
+            except (OSError, subprocess.TimeoutExpired) as e:
+                logger.warning(f"[WorkBBuddy配置] 停止 WorkBuddy 进程失败: {e}")
+        return True, "已还原官方端点" + ("（WorkBuddy 将自动重启）" if changed and restart_wb else "")
     except OSError as e:
         logger.error(f"[WorkBuddy配置] 还原 settings.json 失败: {e}")
         return False, f"还原失败: {e}"
