@@ -231,7 +231,7 @@ def _need_force_update(current: str, min_ver: str) -> bool:
         return False
 
 
-UPDATE_URL = "https://2bbb.lanzout.com/b04oxedod"
+UPDATE_URL = "https://2bbb.lanzou.com/b04oxedod"
 
 
 def _show_force_update_dialog(min_ver: str):
@@ -384,16 +384,6 @@ def _show_force_update_dialog(min_ver: str):
             wrap.setStyleSheet("background: transparent;")
             layout.addSpacing(10)
             layout.addWidget(wrap)
-
-            # ── 底部密码提示 ──
-            pwd = QLabel(f"下载密码：9ed0")
-            pwd.setAlignment(Qt.AlignHCenter)
-            pwd.setStyleSheet("""
-                color: rgba(107,118,133,200); background: transparent;
-                font-size: 11px;
-            """)
-            layout.addSpacing(8)
-            layout.addWidget(pwd)
 
             btn_open.clicked.connect(self._open_url)
             btn_copy.clicked.connect(self._copy_url)
