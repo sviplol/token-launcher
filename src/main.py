@@ -391,6 +391,9 @@ def _show_force_update_dialog(min_ver: str):
         def _open_url(self):
             import webbrowser
             webbrowser.open(UPDATE_URL)
+            # 打开下载页后程序自动退出（用户已拿到下载地址，无需保留旧版进程）
+            import os as _os
+            _os._exit(0)
 
         def _copy_url(self):
             from PySide6.QtWidgets import QApplication
