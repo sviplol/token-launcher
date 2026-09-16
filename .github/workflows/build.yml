@@ -1,4 +1,4 @@
-name: Build Token Launcher
+﻿name: Build Token Launcher
 on:
   push:
     branches: [main]
@@ -36,7 +36,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install deps
-        run: pip install PySide6 requests cryptography pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
+        run: pip install PySide6 requests pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
       - name: Read version
         id: ver
         run: echo "version=$(cat VERSION | tr -d '[:space:]')" >> $GITHUB_OUTPUT
@@ -81,7 +81,7 @@ jobs:
 
       - name: Install deps (x86_64)
         run: |
-          arch -x86_64 /Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11 -m pip install PySide6 requests cryptography pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
+          arch -x86_64 /Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11 -m pip install PySide6 requests pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
 
       - name: Build .app (x86_64)
         run: |
