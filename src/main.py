@@ -235,33 +235,254 @@ UPDATE_URL = "https://2bbb.lanzout.com/b04oxedod"
 
 
 def _show_force_update_dialog(min_ver: str):
-    """强制更新弹窗（模态，无法关闭——必须更新才能继续）"""
-    from PySide6.QtWidgets import QMessageBox, QPushButton
-    msg = QMessageBox()
-    msg.setIcon(QMessageBox.Warning)
-    msg.setWindowTitle("发现新版本")
-    msg.setText(
-        f"当前版本已停用，请更新到最新版本后使用。\n\n"
-        f"当前版本: v{VERSION}\n"
-        f"要求版本: v{min_ver} 及以上\n\n"
-        f"下载地址（密码 9ed0）：\n{UPDATE_URL}"
-    )
-    btn_open = QPushButton("打开下载页")
-    btn_copy = QPushButton("复制下载地址")
-    msg.addButton(btn_open, QMessageBox.AcceptRole)
-    msg.addButton(btn_copy, QMessageBox.ActionRole)
-    msg.addButton(QMessageBox.Close)
-    while True:
-        clicked = msg.exec()
-        if msg.clickedButton() is btn_open:
+    """强制更新弹窗（科技感UI，模态，无法关闭——必须更新才能继续）
+
+    设计：无边框深空渐变窗 + 霓虹青光晕 + 网格纹理 + 版本号对比 + 动画光环
+    """
+    from PySide6.QtCore import (Qt, QTimer, QPropertyAnimation, QEasingCurve,
+                                QSize, QRectF)
+    from PySide6.QtGui import (QColor, QPainter, QPen, QFont, QBrush,
+                               QLinearGradient, QRadialGradient, QPainterPath,
+                               QFontDatabase, QIcon)
+    from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+                                   QPushButton, QGraphicsDropShadowEffect,
+                                   QWidget)
+
+    class _UpdateDialog(QDialog):
+        def __init__(self):
+            super().__init__()
+            self.setWindowTitle("发现新版本")
+            self.setFixedSize(480, 420)
+            self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+            self.setAttribute(Qt.WA_TranslucentBackground, True)
+            self._glow_pos = 0.0
+            self._angle = 0.0
+
+            # 动画定时器（光环旋转+光晕呼吸）
+            self._timer = QTimer(self)
+            self._timer.timeout.connect(self._tick)
+            self._timer.start(30)
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(36, 30, 36, 28)
+            layout.setSpacing(0)
+
+            # ── 顶部：光环图标 ──
+            icon_wrap = QHBoxLayout()
+            icon_wrap.setAlignment(Qt.AlignHCenter)
+            self._icon_lbl = QLabel()
+            self._icon_lbl.setFixedSize(QSize(84, 84))
+            self._icon_lbl.setAlignment(Qt.AlignCenter)
+            # ⬆ 矢量箭头+圆环（paintEvent里画动画，这里放静态箭头字符）
+            self._icon_lbl.setText("⬆")
+            font = QFont()
+            font.setPixelSize(40)
+            font.setBold(True)
+            self._icon_lbl.setFont(font)
+            self._icon_lbl.setStyleSheet("color: #00E5FF; background: transparent;")
+            icon_wrap.addWidget(self._icon_lbl)
+            layout.addLayout(icon_wrap)
+            layout.addSpacing(14)
+
+            # ── 标题 ──
+            title = QLabel("发现新版本")
+            title.setAlignment(Qt.AlignHCenter)
+            tf = QFont()
+            tf.setPixelSize(24)
+            tf.setBold(True)
+            title.setFont(tf)
+            title.setStyleSheet("color: #FFFFFF; background: transparent; letter-spacing: 2px;")
+            layout.addWidget(title)
+
+            sub = QLabel("NEW VERSION AVAILABLE")
+            sub.setAlignment(Qt.AlignHCenter)
+            sub.setStyleSheet("""
+                color: rgba(0,229,255,180); background: transparent;
+                font-size: 10px; font-weight: 600; letter-spacing: 5px;
+            """)
+            layout.addWidget(sub)
+            layout.addSpacing(18)
+
+            # ── 版本对比卡片 ──
+            ver_card = QLabel(
+                f"    当前版本   v{VERSION}    已停用\n"
+                f"    最新版本   v{min_ver}    可用"
+            )
+            ver_card.setAlignment(Qt.AlignLeft)
+            ver_card.setStyleSheet("""
+                QLabel {
+                    background-color: rgba(255,255,255,0.06);
+                    border: 1px solid rgba(0,229,255,0.25);
+                    border-radius: 10px;
+                    color: rgba(232,236,241,220);
+                    font-size: 13px;
+                    padding: 14px 10px;
+                    line-height: 22px;
+                }
+            """)
+            layout.addWidget(ver_card)
+            layout.addSpacing(14)
+
+            # ── 提示文字 ──
+            tip = QLabel("当前版本已停用，请下载最新版本后使用")
+            tip.setAlignment(Qt.AlignHCenter)
+            tip.setStyleSheet("""
+                color: rgba(155,164,176,220); background: transparent;
+                font-size: 12px;
+            """)
+            layout.addWidget(tip)
+            layout.addStretch(1)
+
+            # ── 按钮 ──
+            btn_open = QPushButton("⬇  立即更新")
+            btn_open.setCursor(Qt.PointingHandCursor)
+            btn_open.setFixedHeight(46)
+            btn_open.setStyleSheet("""
+                QPushButton {
+                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #00B8D4, stop:1 #2979FF);
+                    color: white; font-size: 15px; font-weight: bold;
+                    border: none; border-radius: 10px;
+                    letter-spacing: 2px;
+                }
+                QPushButton:hover {
+                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #00E5FF, stop:1 #448AFF);
+                }
+                QPushButton:pressed {
+                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #0097A7, stop:1 #2962FF);
+                }
+            """)
+            shadow = QGraphicsDropShadowEffect()
+            shadow.setBlurRadius(24)
+            shadow.setOffset(0, 4)
+            shadow.setColor(QColor(0, 184, 212, 130))
+            btn_open.setGraphicsEffect(shadow)
+            layout.addWidget(btn_open)
+
+            btn_copy = QPushButton("📋 复制下载地址")
+            btn_copy.setCursor(Qt.PointingHandCursor)
+            btn_copy.setFixedHeight(34)
+            btn_copy.setStyleSheet("""
+                QPushButton {
+                    background-color: rgba(255,255,255,0.07);
+                    color: rgba(232,236,241,200); font-size: 12px;
+                    border: 1px solid rgba(255,255,255,0.14);
+                    border-radius: 8px;
+                }
+                QPushButton:hover {
+                    border-color: rgba(0,229,255,0.5);
+                    color: #00E5FF;
+                }
+            """)
+            copy_row = QHBoxLayout()
+            copy_row.setAlignment(Qt.AlignHCenter)
+            copy_row.addWidget(btn_copy)
+            wrap = QWidget()
+            wrap.setLayout(copy_row)
+            wrap.setStyleSheet("background: transparent;")
+            layout.addSpacing(10)
+            layout.addWidget(wrap)
+
+            # ── 底部密码提示 ──
+            pwd = QLabel(f"下载密码：9ed0")
+            pwd.setAlignment(Qt.AlignHCenter)
+            pwd.setStyleSheet("""
+                color: rgba(107,118,133,200); background: transparent;
+                font-size: 11px;
+            """)
+            layout.addSpacing(8)
+            layout.addWidget(pwd)
+
+            btn_open.clicked.connect(self._open_url)
+            btn_copy.clicked.connect(self._copy_url)
+
+        def _open_url(self):
             import webbrowser
             webbrowser.open(UPDATE_URL)
-            continue
-        if msg.clickedButton() is btn_copy:
+
+        def _copy_url(self):
             from PySide6.QtWidgets import QApplication
             QApplication.clipboard().setText(UPDATE_URL)
-            continue
-        break  # Close按钮或关闭窗口 → 退出程序
+            self._copied = True
+
+        def _tick(self):
+            self._angle = (self._angle + 2.0) % 360.0
+            self._glow_pos = (self._glow_pos + 0.004) % 1.0
+            self.update()
+
+        def paintEvent(self, ev):
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing, True)
+
+            w, h = self.width(), self.height()
+
+            # ── 主体：深空渐变圆角窗 ──
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(0, 0, w, h), 16.0, 16.0)
+            p.save()
+            p.setClipPath(path)
+
+            bg = QLinearGradient(0, 0, w, h)
+            bg.setColorAt(0.0, QColor("#0D1220"))
+            bg.setColorAt(0.5, QColor("#12182B"))
+            bg.setColorAt(1.0, QColor("#0A0E1A"))
+            p.fillPath(path, QBrush(bg))
+
+            # ── 科技网格纹理 ──
+            p.setPen(QPen(QColor(0, 229, 255, 14), 1))
+            for x in range(0, w, 28):
+                p.drawLine(x, 0, x, h)
+            for y in range(0, h, 28):
+                p.drawLine(0, y, w, y)
+
+            # ── 呼吸光晕（顶部） ──
+            gx = self._glow_pos * w
+            glow = QRadialGradient(QRectF(gx, -60, 200, 200).center(), 180)
+            glow.setColorAt(0.0, QColor(0, 184, 212, 38))
+            glow.setColorAt(1.0, QColor(0, 184, 212, 0))
+            p.fillRect(0, 0, w, 160, QBrush(glow))
+
+            # ── 底部霓虹线 ──
+            bl = QLinearGradient(0, 0, w, 0)
+            bl.setColorAt(0.0, QColor(0, 184, 212, 0))
+            bl.setColorAt(0.5, QColor(0, 229, 255, 200))
+            bl.setColorAt(1.0, QColor(41, 121, 255, 0))
+            p.setPen(QPen(QBrush(bl), 2))
+            p.drawLine(0, h - 2, w, h - 2)
+            p.restore()
+
+            # ── 边框霓虹描边 ──
+            p.setPen(QPen(QColor(0, 229, 255, 70), 1))
+            p.drawPath(path)
+
+            # ── 图标光环（旋转圆弧） ──
+            p.setRenderHint(QPainter.Antialiasing, True)
+            cx, cy = w / 2, 72
+            r = 46
+            for start, span, col, wdt in [
+                (self._angle, 100, QColor(0, 229, 255, 200), 3),
+                (self._angle + 180, 100, QColor(41, 121, 255, 160), 2),
+                (self._angle + 90, 60, QColor(0, 184, 212, 100), 1),
+            ]:
+                pen = QPen(col, wdt)
+                pen.setCapStyle(Qt.RoundCap)
+                p.setPen(pen)
+                p.drawArc(QRectF(cx - r, cy - r, r * 2, r * 2), int(start * 16), int(span * 16))
+
+        def closeEvent(self, ev):
+            ev.ignore()  # 禁止关闭（强制更新）
+
+        def reject(self):
+            pass  # Esc无效
+
+    dlg = _UpdateDialog()
+    while True:
+        dlg.exec()
+        # 弹窗不可关闭，只有"打开下载页"后用户手动退出进程
+        # 若用户强杀进程或系统关闭会走到这——直接退出程序
+        break
 
 
 def _cleanup_stale_relay_config():
