@@ -43,9 +43,8 @@ jobs:
       - name: Build .app (arm64)
         run: |
           pyinstaller --windowed --noconfirm --name "Token接入器" --add-data "src:src" --add-data "assets:assets" --collect-submodules src.ui --collect-submodules src.modules --collect-submodules src.utils --collect-submodules src.i18n --collect-submodules src.models --target-arch arm64 src/_entry.py
-      - name: Ad-hoc sign (bypass Gatekeeper)
-        run: |
-          codesign --force --deep --sign - "dist/Token接入器.app"
+      - name: Ad-hoc sign
+        run: codesign --force --deep --sign - "dist/Token接入器.app"
       - name: Create DMG
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
@@ -56,23 +55,23 @@ jobs:
           path: Token接入器_M_v${{ steps.ver.outputs.version }}.dmg
 
   build-mac-intel:
-    runs-on: macos-13
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          architecture: 'x64'
       - name: Install deps
         run: pip install PySide6 requests pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
       - name: Read version
         id: ver
         run: echo "version=$(cat VERSION | tr -d '[:space:]')" >> $GITHUB_OUTPUT
-      - name: Build .app (x86_64 native)
+      - name: Build .app (x86_64 via Rosetta)
         run: |
           pyinstaller --windowed --noconfirm --name "Token接入器-Intel" --add-data "src:src" --add-data "assets:assets" --collect-submodules src.ui --collect-submodules src.modules --collect-submodules src.utils --collect-submodules src.i18n --collect-submodules src.models src/_entry.py
-      - name: Ad-hoc sign (bypass Gatekeeper)
-        run: |
-          codesign --force --deep --sign - "dist/Token接入器-Intel.app"
+      - name: Ad-hoc sign
+        run: codesign --force --deep --sign - "dist/Token接入器-Intel.app"
       - name: Create DMG
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
