@@ -567,8 +567,13 @@ def main():
         os.makedirs(os.path.dirname(lock_path), exist_ok=True)
         try:
             _lock_fp = open(lock_path, "w")
-            import msvcrt
-            msvcrt.locking(_lock_fp.fileno(), msvcrt.LK_NBLCK, 1)
+            if sys.platform == "win32":
+                import msvcrt
+                msvcrt.locking(_lock_fp.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                # macOS/Linux: fcntl.flock 实现同样的独占锁
+                import fcntl
+                fcntl.flock(_lock_fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             # 锁成功——第一个实例
             global _single_lock_fp
             _single_lock_fp = _lock_fp
