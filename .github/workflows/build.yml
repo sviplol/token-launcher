@@ -56,7 +56,7 @@ jobs:
           path: Token接入器_M_v${{ steps.ver.outputs.version }}.dmg
 
   build-mac-intel:
-    runs-on: macos-13
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
