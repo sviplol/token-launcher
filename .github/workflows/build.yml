@@ -62,50 +62,45 @@ jobs:
         id: ver
         run: echo "version=$(cat VERSION | tr -d '[:space:]')" >> $GITHUB_OUTPUT
 
-      # ===== 方案：在M芯片runner上用Rosetta 2跑x86_64 Python =====
-      # 安装x86_64版Homebrew（/usr/local），用它装x86_64 Python
-      - name: Install x86_64 Homebrew + Python (Rosetta 2)
+      - name: Install x86_64 Python from python.org
         run: |
-          # 安装x86_64 brew到/usr/local
-          if [ ! -f /usr/local/bin/brew ]; then
-            arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          fi
-          # 用x86_64 brew装Python
-          arch -x86_64 /usr/local/bin/brew install python@3.11
-          # 验证架构
-          /usr/local/opt/python@3.11/bin/python3.11 -c "import struct; print('Python arch:', 'x86_64' if struct.calcsize('P') == 8 else 'unknown')"
+          # 下载官方x86_64 Python安装包
+          curl -L -o /tmp/python_x86.pkg "https://www.python.org/ftp/python/3.11.9/python-3.11.9-macos11.pkg"
+          # 安装（会装到/Library/Frameworks/Python.framework）
+          sudo installer -pkg /tmp/python_x86.pkg -target /
+          # 官方安装包是universal2（含arm64+x86_64），我们需要用arch -x86_64跑它
+          # 验证：用arch -x86_64跑python3.11
+          arch -x86_64 /Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11 -c "import struct,platform; print(f'arch={platform.machine()} ptr={struct.calcsize(\"P\")}')"
 
       - name: Install deps (x86_64)
         run: |
-          /usr/local/opt/python@3.11/bin/python3.11 -m pip install PySide6 requests pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
+          arch -x86_64 /Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11 -m pip install PySide6 requests pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-      - name: Verify Python is x86_64
+      - name: Build .app (x86_64)
         run: |
-          /usr/local/opt/python@3.11/bin/python3.11 -c "
-          import struct, sys
-          print(f'Python {sys.version}')
-          print(f'pointer size: {struct.calcsize(\"P\")} bytes')
-          import platform
-          print(f'machine: {platform.machine()}')
-          "
-
-      - name: Build .app (x86_64 native)
-        run: |
-          /usr/local/opt/python@3.11/bin/python3.11 -m PyInstaller --windowed --noconfirm --name "Token接入器-Intel" --add-data "src:src" --add-data "assets:assets" --collect-submodules src.ui --collect-submodules src.modules --collect-submodules src.utils --collect-submodules src.i18n --collect-submodules src.models src/_entry.py
+          arch -x86_64 /Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11 -m PyInstaller --windowed --noconfirm --name "Token接入器-Intel" --add-data "src:src" --add-data "assets:assets" --collect-submodules src.ui --collect-submodules src.modules --collect-submodules src.utils --collect-submodules src.i18n --collect-submodules src.models src/_entry.py
 
       - name: Verify binary is x86_64
         run: |
           BINARY="dist/Token接入器-Intel.app/Contents/MacOS/Token接入器-Intel"
           if [ -f "$BINARY" ]; then
-            ARCH=$(file "$BINARY" | grep -o 'x86_64\|arm64')
+            # 读cputype
+            ARCH=$(python3 -c "
+          import struct
+          with open('$BINARY','rb') as f:
+              data=f.read(12)
+          ct=struct.unpack('<I',data[4:8])[0]
+          print('x86_64' if ct==0x01000007 else 'arm64' if ct==0x0100000c else f'unknown_0x{ct:08x}')
+          ")
             echo "Binary architecture: $ARCH"
             if [ "$ARCH" != "x86_64" ]; then
-              echo "ERROR: Binary is NOT x86_64! Build failed."
+              echo "ERROR: Binary is NOT x86_64!"
               exit 1
             fi
+            echo "✓ Confirmed x86_64"
           else
-            echo "ERROR: Binary not found at $BINARY"
-            find dist -name "*.app" -exec find {} -type f -name "Token*" \;
+            echo "Binary not found, searching..."
+            find dist -name "*.app" -exec ls -la {}/Contents/MacOS/ \;
             exit 1
           fi
 
