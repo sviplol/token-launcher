@@ -96,20 +96,20 @@ def is_vscode_codebuddy_installed() -> bool:
 # account_id 是登录账户哈希——必须从库里读现有的（登录后 account_profiles 有值），
 # 未登录时写不了 BYOK（Qoder 也没法用，天然前置）。
 
-# 我们注入的 BYOK 模型清单（1:1 复刻 Qoder 官方列表——老账户官方模型被冻结
-# 不可选时，BYOK 同名自定义模型不受 freezeTurnPolicy 限制（includeByok 通道），
-# 全部走中转映射到上游真实模型，扣 Key 池积分）
+# 我们注入的 BYOK 模型清单（显示名与官方完全一致——用户无感，
+# 实际经中转映射到上游真实模型，扣 Key 池积分。
+# 老账户官方模型冻结时 BYOK 同名模型不受 freezeTurnPolicy 限制）
 QODER_BYOK_MODELS = [
     # (model_key, 显示名, 是否推理模型)
-    ("qwen3.8-max", "Qwen3.8-Max（→hy4）", True),
-    ("qwen3.7-max", "Qwen3.7-Max（→hy4）", True),
-    ("qwen3.7-plus", "Qwen3.7-Plus（→hy3）", False),
+    ("qwen3.8-max", "Qwen3.8-Max", True),
+    ("qwen3.7-max", "Qwen3.7-Max", True),
+    ("qwen3.7-plus", "Qwen3.7-Plus", False),
     ("glm-5.2", "GLM-5.2", False),
     ("glm-5.3", "GLM-5.3", False),
     ("kimi-k3", "Kimi-K3", False),
-    ("kimi-k2.7-code", "Kimi-K2.7-Code（→K2.7）", False),
+    ("kimi-k2.7-code", "Kimi-K2.7-Code", False),
     ("deepseek-v4-pro", "DeepSeek-V4-Pro", True),
-    ("deepseek-v4-flash", "DeepSeek-V4-Flash（→4.1）", False),
+    ("deepseek-v4-flash", "DeepSeek-V4-Flash", False),
     ("minimax-m3", "MiniMax-M3", False),
 ]
 
@@ -223,6 +223,14 @@ def apply_qoder_config(port: int, api_key: str = "antigravity-local") -> tuple:
                  generation, created_at, updated_at)
                 VALUES (?,?,?,?,?,?,?)""",
                 (profile_id, account_id, 1, enc_payload, 1, now_ms, now_ms))
+        # 把首选 BYOK 模型写进 chat_model_preferences（visible=1，
+        # Qoder 模型选择器默认可选中——用户选一次后永久记住）
+        pref_key = f"byok:{_QODER_PROVIDER_KEY}/{QODER_BYOK_MODELS[0][0]}"
+        conn.execute(
+            """INSERT OR REPLACE INTO chat_model_preferences
+            (model_key, visible, context_window, reasoning_effort, updated_at)
+            VALUES (?, 1, NULL, NULL, ?)""",
+            (pref_key, now_ms))
         conn.commit()
         conn.close()
         logger.info(f"[Qoder] 已写入 {len(QODER_BYOK_MODELS)} 个 BYOK 模型+credentials → {endpoint}"
@@ -245,13 +253,16 @@ def restore_qoder_config() -> tuple:
         conn.execute(
             "DELETE FROM byok_model_credentials WHERE profile_id LIKE ?",
             (_QODER_PROFILE_PREFIX + "%",))
+        conn.execute(
+            "DELETE FROM chat_model_preferences WHERE model_key LIKE ?",
+            (f"byok:{_QODER_PROVIDER_KEY}/%",))
         cur = conn.execute(
             "DELETE FROM byok_model_profiles WHERE provider_key=?",
             (_QODER_PROVIDER_KEY,))
         n = cur.rowcount
         conn.commit()
         conn.close()
-        logger.info(f"[Qoder] 已还原（删除 {n} 个 BYOK 模型+credentials）")
+        logger.info(f"[Qoder] 已还原（删除 {n} 个 BYOK 模型+credentials+preferences）")
         return True, f"已还原（移除 {n} 个 BYOK 模型）"
     except sqlite3.Error as e:
         logger.error(f"[Qoder] BYOK 还原失败: {e}")
