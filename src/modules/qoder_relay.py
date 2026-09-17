@@ -436,9 +436,9 @@ def get_vscode_config_state(port: int) -> dict:
 def apply_vscode_config(port: int) -> tuple:
     """把 VSCode CodeBuddy 扩展端点指向本地中转
 
-    写 user settings 的 codingcopilot.endpoint 后，自动调用
-    `code --command "workbench.action.reloadWindow"` 热加载——
-    不需要手动重启 VSCode（CodeBuddy 扩展的 language client 会重新连接端点）。
+    只写 user settings——绝不发任何命令、绝不启动 VSCode（用户要求不强制开程序）。
+    VSCode 打开时读 settings 自动生效；已开窗口若未热生效，用户下次
+    重载/重启窗口即接管（写入日志提示，不弹窗）。
     """
     if not is_vscode_codebuddy_installed():
         return False, "未检测到 VSCode settings.json"
@@ -446,30 +446,11 @@ def apply_vscode_config(port: int) -> tuple:
         settings = _load_vscode_settings()
         settings[VSCODE_CB_ENDPOINT_KEY] = f"http://127.0.0.1:{port}"
         _save_vscode_settings(settings)
-        logger.info(f"[VSCode CodeBuddy] 端点已指向 http://127.0.0.1:{port}")
-        # 尝试热加载（VSCode 在跑就 reload，没跑就跳过）
-        _try_vscode_reload()
-        return True, "已写入并尝试热加载（VSCode 窗口会自动刷新）"
+        logger.info(f"[VSCode CodeBuddy] 端点已指向 http://127.0.0.1:{port}（打开VSCode时生效）")
+        return True, "已写入（VSCode 打开时自动生效）"
     except OSError as e:
         logger.error(f"[VSCode CodeBuddy] 写入失败: {e}")
         return False, f"写入失败: {e}"
-
-
-def _try_vscode_reload():
-    """通过 VSCode CLI 发 Reload Window 命令（热加载 endpoint 变更）"""
-    import subprocess
-    import shutil as _sh
-    code_exe = _sh.which("code")
-    if not code_exe:
-        return  # VSCode 不在 PATH——跳过热加载（用户手动重启）
-    try:
-        subprocess.Popen(
-            [code_exe, "--command", "workbench.action.reloadWindow"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=0x08000000 if sys.platform == "win32" else 0)
-        logger.info("[VSCode CodeBuddy] 已发送 Reload Window 命令（热加载）")
-    except Exception as e:
-        logger.warning(f"[VSCode CodeBuddy] 热加载命令失败（用户需手动重启VSCode）: {e}")
 
 
 def restore_vscode_config() -> tuple:

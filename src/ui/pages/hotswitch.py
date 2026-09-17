@@ -415,7 +415,7 @@ class HotSwitchPage(QWidget):
         title.setObjectName("page_title")
         layout.addWidget(title)
 
-        subtitle = QLabel("点击下方按钮自动接入 WorkBuddy / CodeBuddy / VSCode CodeBuddy / Qoder，全部走中转扣Key池积分")
+        subtitle = QLabel("所有模型完美接入对应工具（WorkBuddy / CodeBuddy / VSCode CodeBuddy / Qoder）——不强制打开任何程序，随时待命")
         subtitle.setObjectName("page_subtitle")
         layout.addWidget(subtitle)
 
@@ -867,14 +867,24 @@ class HotSwitchPage(QWidget):
             ok, _msg = apply_workbuddy_config(port)
             if ok:
                 save_setting("codebuddy_relay_wb_enabled", "1")
-        # Qoder / VSCode CodeBuddy 同步自动接入（2026-09-17）
-        from ...modules.qoder_relay import (
-            is_qoder_installed, apply_qoder_config,
-            is_vscode_codebuddy_installed, apply_vscode_config)
-        if is_qoder_installed():
-            apply_qoder_config(port)
-        if is_vscode_codebuddy_installed():
-            apply_vscode_config(port)
+        # Qoder / VSCode CodeBuddy 后台静默接入（2026-09-18：不阻塞启动、不弹窗、不强制开程序）
+        def _bg_autostart_qv():
+            try:
+                from ...modules.qoder_relay import (
+                    is_qoder_installed, apply_qoder_config,
+                    patch_qoder_unlock, qoder_unlock_patch_status,
+                    is_vscode_codebuddy_installed, apply_vscode_config)
+                if is_qoder_installed():
+                    apply_qoder_config(port)
+                    _qs = qoder_unlock_patch_status()
+                    if _qs.get("installed") and not _qs.get("patched"):
+                        patch_qoder_unlock()
+                if is_vscode_codebuddy_installed():
+                    apply_vscode_config(port)
+            except Exception:
+                pass
+        import threading as _th2
+        _th2.Thread(target=_bg_autostart_qv, daemon=True).start()
         self._refresh_status()
 
     def _toggle_service(self):
@@ -953,43 +963,42 @@ class HotSwitchPage(QWidget):
             else:
                 QMessageBox.warning(self, "WorkBuddy 接入失败", msg)
 
-        # 自动接入 Qoder（BYOK openai-compatible，2026-09-17新增）
-        from ...modules.qoder_relay import is_qoder_installed, apply_qoder_config
-        if is_qoder_installed():
-            ok, msg = apply_qoder_config(port)
-            if not ok:
-                QMessageBox.warning(self, "Qoder 接入失败", msg)
-            else:
-                QMessageBox.information(self, "Qoder 已接入",
-                    "Qoder BYOK 已配置完成！\n\n"
-                    "在 Qoder 的模型选择里选「本地中转（Token接入器）」"
-                    "下的模型即可使用。\n"
-                    "（千问系列已自动映射到混元，扣 Key 池积分）")
-        # Qoder 官方模型解锁补丁（2026-09-18用户定案：强行可选冻结模型）
-        from ...modules.qoder_relay import (
-            patch_qoder_unlock, qoder_unlock_patch_status)
-        _qs = qoder_unlock_patch_status()
-        if _qs.get("installed") and not _qs.get("patched"):
-            # 补丁需要Qoder退出（文件锁）——自动杀+打+重启
-            from ...modules.qoder_relay import _kill_qoder
-            _kill_qoder()
-            ok, msg = patch_qoder_unlock()
-            if ok:
-                # 重新拉起Qoder（用户无感）
-                import subprocess as _sp
-                qoder_exe = _qs["asar"].replace("\\resources\\app.asar", "\\Qoder CN.exe")
-                if os.path.isfile(qoder_exe):
-                    _sp.Popen([qoder_exe], start_new_session=True)
-                self._status_label.setText("✅ 接入服务已开启（Qoder官方模型已解锁）")
-            else:
-                QMessageBox.warning(self, "Qoder 解锁失败", msg)
+        # ===== Qoder / VSCode CodeBuddy 后台接入（2026-09-18：绝不阻塞UI、
+        # 不强制打开任何程序、不弹窗——接入静默完成，随时待命）=====
+        import threading as _th
 
-        # 自动接入 VSCode CodeBuddy（2026-09-17新增，重启 VSCode 生效）
-        from ...modules.qoder_relay import is_vscode_codebuddy_installed, apply_vscode_config
-        if is_vscode_codebuddy_installed():
-            ok, msg = apply_vscode_config(port)
-            if not ok:
-                QMessageBox.warning(self, "VSCode CodeBuddy 接入失败", msg)
+        def _bg_apply_qoder_vscode():
+            try:
+                from ...modules.qoder_relay import (
+                    is_qoder_installed, apply_qoder_config,
+                    patch_qoder_unlock, qoder_unlock_patch_status,
+                    is_vscode_codebuddy_installed, apply_vscode_config)
+                # Qoder BYOK（静默——无弹窗）
+                if is_qoder_installed():
+                    apply_qoder_config(port)
+                # Qoder 官方模型解锁补丁（静默；Qoder 没开才打，开了等下次）
+                _qs = qoder_unlock_patch_status()
+                if _qs.get("installed") and not _qs.get("patched"):
+                    import subprocess as _sp
+                    # 只在 Qoder 没运行时打补丁（运行中文件锁定 + 用户正在用不打扰）
+                    try:
+                        _r = _sp.run(["tasklist", "/FI", "IMAGENAME eq Qoder CN.exe"],
+                                     capture_output=True, timeout=8, text=True)
+                        _qoder_running = "Qoder CN.exe" in _r.stdout
+                    except Exception:
+                        _qoder_running = False
+                    if not _qoder_running:
+                        ok, _msg = patch_qoder_unlock()
+                        if ok:
+                            logging.getLogger(__name__).info(
+                                "[Qoder解锁] 官方模型解锁补丁完成（含冻结的GLM-5.3等）")
+                # VSCode CodeBuddy（静默；只在VSCode已开着时发Reload，绝不启动新实例）
+                if is_vscode_codebuddy_installed():
+                    apply_vscode_config(port)
+            except Exception:
+                logging.getLogger(__name__).exception("[后台接入] Qoder/VSCode配置异常")
+
+        _th.Thread(target=_bg_apply_qoder_vscode, daemon=True).start()
 
         # 自动接入 CodeBuddy（需要开发者模式 + 重启生效）
         if is_codebuddy_installed():
