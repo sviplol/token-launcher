@@ -3353,7 +3353,10 @@ class CardKeyFetchDialog(QDialog):
         key = self._card_input.text().strip()
 
         # ===== 下载前本地核验：该卡密的账号是否已在本地 =====
-        # 本地 accounts 表用 account_group=卡密号 标记来源，已导入过就不浪费下载次数
+        # 本地 accounts 表用 account_group=卡密号 标记来源
+        # ★2026-09-17修复：本地有账号 ≠ 无需下载——还要看Key池有没有这些号！
+        # 用户清空Key池后重新下载是合法恢复场景（服务器端绑定号完整时免计次下发），
+        # 只有"本地有且Key池也有"才真拦（避免浪费下载次数）
         try:
             import sqlite3 as _sql2
             from ...utils.store import _get_db_path as _dbp2
@@ -3370,20 +3373,55 @@ class CardKeyFetchDialog(QDialog):
         except Exception:
             local_count = 0
 
+        # 查Key池是否已有该卡密的账号（account_group=卡密号的uid在Key池中出现）
+        pool_has_card_accounts = False
+        if local_count > 0:
+            try:
+                import sqlite3 as _sql3b
+                from ...utils.store import _get_db_path as _dbp3b
+                conn3 = _sql3b.connect(str(_dbp3b()))
+                c3 = conn3.cursor()
+                local_uids = [r[0] for r in c3.execute(
+                    "SELECT uid FROM accounts WHERE account_group=?", (key,)).fetchall()]
+                conn3.close()
+                if local_uids:
+                    from ...modules.proxy_server import ProxyDatabase as _PDB2
+                    _pdb2 = _PDB2.get_instance()
+                    pool_uids = set()
+                    for _pk in _pdb2.get_upstream_keys():
+                        _plbl = str(_pk.get("label", ""))
+                        _papi = str(_pk.get("api_key", ""))
+                        # Key池条目带uid信息有限——用api_key与accounts表api_key对比
+                        pool_uids.add(_papi)
+                    c3b = _sql3b.connect(str(_dbp3b()))
+                    c3b.row_factory = _sql3b.Row
+                    placeholders3 = ",".join("?" * len(local_uids))
+                    rows3 = c3b.execute(
+                        f"SELECT api_key, auth_token, ck FROM accounts WHERE uid IN ({placeholders3})",
+                        local_uids).fetchall()
+                    c3b.close()
+                    for r3 in rows3:
+                        ak = (r3["api_key"] or r3["auth_token"] or "") if "api_key" in r3.keys() else ""
+                        if ak and ak in pool_uids:
+                            pool_has_card_accounts = True
+                            break
+            except Exception:
+                pool_has_card_accounts = False  # 查不了Key池→按无池处理，放行下载
+
         need_count = int(self._card_info.get("account_count", 0) or 0)
-        if local_count > 0 and local_count >= need_count:
-            # 本地已完整存在该卡密的全部账号
+        if local_count > 0 and local_count >= need_count and pool_has_card_accounts:
+            # 本地已完整存在 且 Key池也有 → 真拦（省下载次数）
             self._progress_bar.setVisible(False)
             self._log_edit.setVisible(True)
-            self._append_log(f"✅ 该卡密的 {local_count} 个账号已完整保存在本地，无需重新下载")
-            self._append_log("💡 直接在「账号管理」页即可使用（可点顶部刷新按钮核对最新积分）")
-            self._progress_label.setText(f"✅ 账号已在本地（{local_count} 个），无需重新下载")
+            self._append_log(f"✅ 该卡密的 {local_count} 个账号已完整在本地且Key池可用，无需重新下载")
+            self._append_log("💡 如需恢复账号，请勿清空Key池；清空后重新下载即可免费恢复（不计次）")
+            self._progress_label.setText(f"✅ 账号已在本地且在Key池（{local_count} 个），无需重新下载")
             from PySide6.QtWidgets import QMessageBox as _MB
             _MB.information(
                 self, "无需下载",
-                f"该卡密的 {local_count} 个账号已完整在本地，无需重新下载。\n\n"
+                f"该卡密的 {local_count} 个账号已完整在本地且Key池可用，无需重新下载。\n\n"
                 "下载会消耗卡密的提取次数（共5次），已导入过的请直接使用。\n"
-                "如需重新下载，请联系商家重置次数。"
+                "提示：若清空了Key池，重新下载可免费恢复（不消耗次数）。"
             )
             self._btn_fetch.setEnabled(False)
             self._btn_verify.setEnabled(False)
@@ -3451,6 +3489,18 @@ class CardKeyFetchDialog(QDialog):
             return
 
         data = result["data"]
+        # ★2026-09-17修复：先查服务器业务结果（ok字段）——
+        # 服务器业务失败（如号池积分不足）时旧客户端会把error响应当成功解析，
+        # accounts为空 → 误报"服务器未返回账号"掩盖真实原因
+        if data.get("ok") is False:
+            err = str(data.get("error", "服务器拒绝下载"))
+            self._progress_label.setText(f"❌ 提取失败：{err}")
+            self._append_log(f"❌ 提取失败：{err}")
+            if "号池积分不足" in err:
+                self._append_log("💡 服务器原样透传：绑定号的积分可能已被消耗低于面额，且号池暂无符合档位的号可补位")
+                self._append_log("💡 解决方案：等号池补货后重试，或联系商家核查卡密绑定号状态")
+            self._reset_ui()
+            return
         accounts_raw = data.get("accounts", [])
         if not accounts_raw:
             # 防御：服务器返回ok但账号为空（正常不会发生），给出完整诊断
