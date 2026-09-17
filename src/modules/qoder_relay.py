@@ -54,7 +54,135 @@ def _seal_credential(payload: dict) -> bytes:
     """模拟 Electron safeStorage.encryptString(JSON.stringify(payload))"""
     return _dpapi_encrypt(json.dumps(payload, ensure_ascii=False))
 
-# ============ Qoder 路径 ============
+# ============ Qoder 官方模型解锁补丁（2026-09-18，用户定案：强行可选冻结模型） ============
+# 老账户官方模型目录（服务端下发 platformModels）里 enabled=false（冻结），
+# kY 策略函数用 filter(a=>a.enabled) + visible!==!1 两道过滤拦截选择。
+# 补丁 = 等长字节替换两处过滤（不破坏 asar 结构），每次点"启动接入"自动重打
+# （Qoder 升级会还原 app.asar，重打即恢复）。
+
+# 补丁定位串（app.asar 内各出现 1 次，字节级实测）
+_QODER_PATCH_TARGETS = [
+    # (原串, 替换串——等长，空格填充)
+    (b"const i=t.models.filter(a=>a.enabled)",
+     b"const i=t.models                     "),  # 37B：去掉enabled过滤
+    (b"r=a=>A.get(a.key)?.visible!==!1",
+     b"r=a=>!0                        "),  # 31B：去掉visible过滤
+]
+
+
+def get_qoder_asar_path() -> str:
+    """Qoder CN / 海外版 app.asar 路径（实际安装位置）"""
+    candidates = [
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Qoder CN\resources\app.asar"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Qoder\resources\app.asar"),
+        r"D:\Qoder CN\resources\app.asar",
+        r"C:\Program Files\Qoder\resources\app.asar",
+    ]
+    return next((p for p in candidates if os.path.isfile(p)), "")
+
+
+def qoder_unlock_patch_status() -> dict:
+    """检测 app.asar 的解锁补丁状态"""
+    asar = get_qoder_asar_path()
+    if not asar:
+        return {"installed": False, "patched": False, "asar": ""}
+    try:
+        with open(asar, "rb") as f:
+            data = f.read()
+        patched = all(
+            data.find(new) >= 0 for _, new in _QODER_PATCH_TARGETS)
+        return {"installed": True, "patched": patched, "asar": asar}
+    except OSError:
+        return {"installed": True, "patched": False, "asar": asar}
+
+
+def patch_qoder_unlock() -> tuple:
+    """给 Qoder app.asar 打模型解锁补丁（等长替换，幂等可重打）
+
+    Qoder 运行中文件被锁——调用方需先杀 Qoder 进程。
+    首次打补丁前备份 app.asar.orig。
+    """
+    asar = get_qoder_asar_path()
+    if not asar:
+        return False, "未找到 Qoder app.asar（未安装？）"
+    try:
+        with open(asar, "rb") as f:
+            data = f.read()
+    except PermissionError:
+        return False, "app.asar 被占用（Qoder 正在运行）——请先退出 Qoder"
+    except OSError as e:
+        return False, f"读取失败: {e}"
+
+    # 幂等：已打则跳过
+    if all(data.find(new) >= 0 for _, new in _QODER_PATCH_TARGETS):
+        return True, "解锁补丁已就位（无需重打）"
+
+    # 校验定位串存在且各1次（防版本变更误伤）
+    for orig, _ in _QODER_PATCH_TARGETS:
+        n = data.count(orig)
+        if n != 1:
+            return False, (f"定位串出现{n}次(应为1)——Qoder版本可能已更新，"
+                           f"补丁中止防误伤")
+        # 长度校验
+    for orig, new in _QODER_PATCH_TARGETS:
+        if len(orig) != len(new):
+            return False, f"补丁长度不一致: {len(orig)} vs {len(new)}"
+
+    # 备份（首次）
+    orig_bak = asar + ".orig"
+    if not os.path.exists(orig_bak):
+        shutil.copy2(asar, orig_bak)
+
+    # 等长替换
+    patched = data
+    for orig, new in _QODER_PATCH_TARGETS:
+        patched = patched.replace(orig, new)
+
+    # 原子写
+    tmp = asar + ".tmp-patch"
+    with open(tmp, "wb") as f:
+        f.write(patched)
+    os.replace(tmp, asar)
+    logger.info(f"[Qoder解锁] app.asar 补丁完成（2处过滤移除，全部官方模型可选）")
+    return True, "解锁补丁完成——Qoder 里全部官方模型（含冻结的 GLM-5.3 等）已可选"
+
+
+def restore_qoder_unlock() -> tuple:
+    """还原 app.asar（从 .orig 备份恢复）"""
+    asar = get_qoder_asar_path()
+    if not asar:
+        return True, "未安装 Qoder，无需还原"
+    orig_bak = asar + ".orig"
+    if not os.path.exists(orig_bak):
+        return True, "无补丁备份（未打过补丁）"
+    try:
+        shutil.copy2(orig_bak, asar)
+        logger.info("[Qoder解锁] app.asar 已还原原版")
+        return True, "已还原官方原版（模型恢复冻结状态）"
+    except PermissionError:
+        return False, "app.asar 被占用（Qoder 正在运行）——请先退出 Qoder"
+    except OSError as e:
+        return False, f"还原失败: {e}"
+
+
+def _kill_qoder() -> bool:
+    """杀 Qoder 进程（打补丁前需要——文件被锁）"""
+    import subprocess
+    try:
+        subprocess.run(
+            ["taskkill", "/IM", "Qoder CN.exe", "/F"],
+            capture_output=True, timeout=15)
+        subprocess.run(
+            ["taskkill", "/IM", "Qoder.exe", "/F"],
+            capture_output=True, timeout=15)
+        import time as _t
+        _t.sleep(2)
+        return True
+    except Exception:
+        return False
+
+
+# ============ Qoder 数据目录 ============
 _QODER_CANDIDATES = [
     os.path.expandvars(r"%APPDATA%\com.qodercn.app.stable"),   # Qoder CN（国内版）
     os.path.expandvars(r"%APPDATA%\com.qoder.app.stable"),     # Qoder 国际版

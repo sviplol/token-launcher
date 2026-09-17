@@ -6,6 +6,7 @@
 - 使用日志独立，只记录经过本中转的请求
 """
 
+import os
 import secrets
 import time
 import logging
@@ -964,6 +965,24 @@ class HotSwitchPage(QWidget):
                     "在 Qoder 的模型选择里选「本地中转（Token接入器）」"
                     "下的模型即可使用。\n"
                     "（千问系列已自动映射到混元，扣 Key 池积分）")
+        # Qoder 官方模型解锁补丁（2026-09-18用户定案：强行可选冻结模型）
+        from ...modules.qoder_relay import (
+            patch_qoder_unlock, qoder_unlock_patch_status)
+        _qs = qoder_unlock_patch_status()
+        if _qs.get("installed") and not _qs.get("patched"):
+            # 补丁需要Qoder退出（文件锁）——自动杀+打+重启
+            from ...modules.qoder_relay import _kill_qoder
+            _kill_qoder()
+            ok, msg = patch_qoder_unlock()
+            if ok:
+                # 重新拉起Qoder（用户无感）
+                import subprocess as _sp
+                qoder_exe = _qs["asar"].replace("\\resources\\app.asar", "\\Qoder CN.exe")
+                if os.path.isfile(qoder_exe):
+                    _sp.Popen([qoder_exe], start_new_session=True)
+                self._status_label.setText("✅ 接入服务已开启（Qoder官方模型已解锁）")
+            else:
+                QMessageBox.warning(self, "Qoder 解锁失败", msg)
 
         # 自动接入 VSCode CodeBuddy（2026-09-17新增，重启 VSCode 生效）
         from ...modules.qoder_relay import is_vscode_codebuddy_installed, apply_vscode_config
