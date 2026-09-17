@@ -3491,10 +3491,23 @@ class CardKeyFetchDialog(QDialog):
             return
 
         # 账号去重：检查本地数据库是否已存在
+        # ★2026-09-16修复：uid存在于accounts表 ≠ 重复导入。
+        # 用户清空Key池（API列表）后重新下载是合法场景——此时accounts表有历史记录
+        # 但Key池已空，必须放行重新导入（入库逻辑本身对accounts表UPSERT、Key池按
+        # api_key去重插入，不会产生重复数据）。
+        # 判定规则：uid在accounts表 且 其Key(api_key/auth_token)已在Key池 → 真重复跳过；
+        #          uid在accounts表 但 Key不在Key池 → 视为"Key池缺失"放行导入。
         import sqlite3, os as _os
         from ...utils.store import _get_db_path as _store_db_path
         db_path = str(_store_db_path())
         existing_uids = set()
+        key_pool_tokens = set()
+        try:
+            from ...modules.proxy_server import ProxyDatabase as _PDB
+            _pdb = _PDB.get_instance()
+            key_pool_tokens = {k.get("api_key", "") for k in _pdb.get_upstream_keys()}
+        except Exception:
+            key_pool_tokens = None  # Key池不可用时不做池判定（只按accounts表去重，老行为）
         if _os.path.exists(db_path):
             try:
                 conn = sqlite3.connect(db_path)
@@ -3508,7 +3521,32 @@ class CardKeyFetchDialog(QDialog):
             except Exception:
                 pass
 
-        if existing_uids:
+        if existing_uids and key_pool_tokens is not None:
+            dup_count = 0
+            new_accounts = []
+            for a in accounts:
+                if a.get("uid") not in existing_uids:
+                    new_accounts.append(a)
+                    continue
+                # uid已存在本地——看它的Key是否在池里
+                ak = a.get("api_key", "") or a.get("auth_token", "")
+                if ak and ak in key_pool_tokens:
+                    dup_count += 1  # Key也在池里=真重复
+                else:
+                    new_accounts.append(a)  # Key不在池里=池缺失，放行重新导入
+            if dup_count > 0:
+                self._append_log(f"⚠️ {dup_count} 个账号已存在本地且在Key池（跳过）")
+            if not new_accounts:
+                self._progress_label.setText(f"❌ {dup_count} 个账号已全部存在本地，无需重复导入")
+                self._append_log(f"❌ 该卡密的账号已全部导入过，无需重复下载")
+                self._reset_ui()
+                return
+            if dup_count < len([a for a in accounts if a.get("uid") in existing_uids]):
+                recovered = len([a for a in accounts if a.get("uid") in existing_uids]) - dup_count
+                self._append_log(f"♻️ {recovered} 个账号在Key池中缺失，将重新导入恢复")
+            accounts = new_accounts
+        elif existing_uids:
+            # Key池不可用（异常兜底）——保持老行为
             dup_count = len([a for a in accounts if a.get("uid") in existing_uids])
             new_accounts = [a for a in accounts if a.get("uid") not in existing_uids]
             if dup_count > 0:
