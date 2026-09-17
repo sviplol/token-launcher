@@ -1,4 +1,3 @@
-
 name: Build Token Launcher
 on:
   push:
