@@ -3610,6 +3610,19 @@ class CardKeyFetchDialog(QDialog):
 
         self._progress_bar.setValue(100)
         self._append_log(f"✅ 核验通过：{verify_ok}/{len(accounts)} 个账号已确认入库")
+
+        # ★2026-09-17修复：清理无效缓存——之前token为空bug导入的空token记录
+        # 这些记录auth_token为空=无效垃圾数据，显示假账号数但Key池没有
+        try:
+            import sqlite3 as _sql_clean
+            from ...utils.store import _get_db_path as _dbp_clean
+            _c_clean = _sql_clean.connect(str(_dbp_clean()))
+            _c_clean.execute(
+                "DELETE FROM accounts WHERE auth_token='' OR auth_token IS NULL")
+            _c_clean.commit()
+            _c_clean.close()
+        except Exception:
+            pass  # 清理失败不影响导入
         self._append_log("📊 积分刷新已自动触发（见账号管理页日志）")
 
         # ===== 客户告知：获取账号数 + 真实积分总和 + 赠送/波动提示 =====
