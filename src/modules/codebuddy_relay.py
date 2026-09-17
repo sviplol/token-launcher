@@ -67,13 +67,71 @@ _BARE_OPENAI_PREFIXES = (
     "/embeddings",
     "/audio/",
 )
+# OpenAI 标准的 /v1 前缀（Qoder BYOK / 通用 OpenAI 客户端用）也归一到 /v2
+_V1_OPENAI_PREFIXES = (
+    "/v1/chat/completions",
+    "/v1/completions",
+    "/v1/embeddings",
+    "/v1/models",
+    "/v1/images/generations",
+    "/v1/images/edits",
+    "/v1/videos/generations",
+)
+
+# ============ Qoder 模型映射（2026-09-17，基于本机 WorkBuddy models.json 实测ID） ============
+# Qoder 用户在 BYOK 里填原生模型名，中转改写为上游实际模型 ID 再转发——
+# 计费统一走 Key 池积分。
+# 上游真实模型（~/.workbuddy/models.json 实测）：hy4-preview / hy3 /
+# deepseek-v4-pro / deepseek-v4.1-flash / glm-5.3 / glm-5.3-flash / glm-5.2 /
+# glm-5.1 / glm-5v-turbo / minimax-m3 / kimi-k3 / kimi-k2.7 / kimi-k2.6
+# 用户定案：Qoder 的 qwen 系列全部用 hy4/hy3 代替。
+QODER_MODEL_MAP = {
+    # Qoder 千问系列 → 混元 hy4/hy3（用户定案：qwen 全部用 hy3/4 代替）
+    "qwen3.8-max": "hy4-preview",
+    "qwen3.7-max": "hy4-preview",
+    "qwen3.7-plus": "hy3",
+    # 重名直接透传（上游真实存在）
+    "glm-5.2": "glm-5.2",
+    "glm-5.3": "glm-5.3",
+    "kimi-k3": "kimi-k3",
+    "deepseek-v4-pro": "deepseek-v4-pro",
+    "deepseek-v4-flash": "deepseek-v4.1-flash",
+    # 同家族就近替代（上游真实ID）
+    "kimi-k2.7-code": "kimi-k2.7",
+    "minimax-m3": "minimax-m3",
+}
+
+
+def _map_qoder_model(body: bytes) -> bytes:
+    """Qoder BYOK 请求体的 model 字段改写（qwen→hunyuan 等），失败原样返回"""
+    if not body:
+        return body
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return body
+    model = data.get("model")
+    if not isinstance(model, str):
+        return body
+    mapped = QODER_MODEL_MAP.get(model)
+    if not mapped or mapped == model:
+        return body
+    try:
+        data["model"] = mapped
+        new_body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        logger.info(f"[CodeBuddy中转] 模型映射: {model} → {mapped}（Qoder BYOK）")
+        return new_body
+    except (ValueError, TypeError):
+        return body
 
 
 def _normalize_upstream_path(path: str) -> str:
-    """裸 OpenAI 路径补 /v2 前缀，其余原样"""
+    """裸 OpenAI 路径补 /v2 前缀；/v1 前缀归一到 /v2；其余原样"""
     p = urlsplit(path).path
     if p.startswith(_BARE_OPENAI_PREFIXES):
         return "/v2" + path
+    if p in _V1_OPENAI_PREFIXES:
+        return path.replace("/v1/", "/v2/", 1)
     return path
 
 # 请求侧需要剥掉的 hop-by-hop 头
@@ -640,6 +698,9 @@ class CodeBuddyRelayServer:
                 upstream_path = _normalize_upstream_path(path)
                 swap = _is_swap_path(upstream_path)
                 body = self._read_body()
+                # Qoder BYOK 模型映射（qwen→hunyuan 等，命中映射表才改写）
+                if swap and body:
+                    body = _map_qoder_model(body)
                 model = _extract_model(body) or "-"
                 t0 = time.time()
                 url = UPSTREAM_BASE + upstream_path

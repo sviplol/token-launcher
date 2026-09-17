@@ -509,6 +509,21 @@ def _cleanup_stale_relay_config():
         if is_codebuddy_installed():
             # CodeBuddy 残余配置同样清理
             restore_client_config()
+        # Qoder BYOK / VSCode CodeBuddy 残余配置清理（2026-09-17）
+        from .modules.qoder_relay import (
+            is_qoder_installed, restore_qoder_config,
+            is_vscode_codebuddy_installed, restore_vscode_config,
+            get_qoder_config_state, get_vscode_config_state)
+        if is_qoder_installed():
+            qs = get_qoder_config_state(int(port))
+            if qs.get("pointed_to_us"):
+                restore_qoder_config()
+                logging.getLogger(__name__).info("[启动清理] 检测到 Qoder BYOK 残留配置，已清理")
+        if is_vscode_codebuddy_installed():
+            vs = get_vscode_config_state(int(port))
+            if vs.get("pointed_to_us"):
+                restore_vscode_config()
+                logging.getLogger(__name__).info("[启动清理] 检测到 VSCode CodeBuddy 残留端点，已清理")
     except Exception:
         pass  # 清理失败不阻塞启动
 

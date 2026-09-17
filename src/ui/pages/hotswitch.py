@@ -791,6 +791,14 @@ class HotSwitchPage(QWidget):
         wb_btn_row.addStretch()
         wb_layout.addLayout(wb_btn_row)
 
+        # Qoder / VSCode CodeBuddy 接入状态区（2026-09-17）
+        self._qoder_label = QLabel("检测中…")
+        self._qoder_label.setStyleSheet(
+            "font-size: 12px; background: #F0F7FF; border-radius: 8px; padding: 8px;"
+            "color: #1A56DB;")
+        self._qoder_label.setWordWrap(True)
+        wb_layout.addWidget(self._qoder_label)
+
         client_layout.addWidget(wb_card)
         client_layout.addStretch()
 
@@ -858,6 +866,14 @@ class HotSwitchPage(QWidget):
             ok, _msg = apply_workbuddy_config(port)
             if ok:
                 save_setting("codebuddy_relay_wb_enabled", "1")
+        # Qoder / VSCode CodeBuddy 同步自动接入（2026-09-17）
+        from ...modules.qoder_relay import (
+            is_qoder_installed, apply_qoder_config,
+            is_vscode_codebuddy_installed, apply_vscode_config)
+        if is_qoder_installed():
+            apply_qoder_config(port)
+        if is_vscode_codebuddy_installed():
+            apply_vscode_config(port)
         self._refresh_status()
 
     def _toggle_service(self):
@@ -890,6 +906,18 @@ class HotSwitchPage(QWidget):
                 ok, msg = restore_workbuddy_config()
                 if not ok:
                     QMessageBox.warning(self, "还原 WorkBuddy 配置失败", msg)
+            # Qoder BYOK / VSCode CodeBuddy 一并还原（2026-09-17）
+            from ...modules.qoder_relay import (
+                is_qoder_installed, restore_qoder_config,
+                is_vscode_codebuddy_installed, restore_vscode_config)
+            if is_qoder_installed():
+                ok, msg = restore_qoder_config()
+                if not ok:
+                    QMessageBox.warning(self, "还原 Qoder 配置失败", msg)
+            if is_vscode_codebuddy_installed():
+                ok, msg = restore_vscode_config()
+                if not ok:
+                    QMessageBox.warning(self, "还原 VSCode CodeBuddy 配置失败", msg)
             self._refresh_status()
             return
 
@@ -923,6 +951,26 @@ class HotSwitchPage(QWidget):
                 save_setting("codebuddy_relay_wb_enabled", "1")
             else:
                 QMessageBox.warning(self, "WorkBuddy 接入失败", msg)
+
+        # 自动接入 Qoder（BYOK openai-compatible，2026-09-17新增）
+        from ...modules.qoder_relay import is_qoder_installed, apply_qoder_config
+        if is_qoder_installed():
+            ok, msg = apply_qoder_config(port)
+            if not ok:
+                QMessageBox.warning(self, "Qoder 接入失败", msg)
+            else:
+                QMessageBox.information(self, "Qoder 已接入",
+                    "Qoder BYOK 已配置完成！\n\n"
+                    "在 Qoder 的模型选择里选「本地中转（Token接入器）」"
+                    "下的模型即可使用。\n"
+                    "（千问系列已自动映射到混元，扣 Key 池积分）")
+
+        # 自动接入 VSCode CodeBuddy（2026-09-17新增，重启 VSCode 生效）
+        from ...modules.qoder_relay import is_vscode_codebuddy_installed, apply_vscode_config
+        if is_vscode_codebuddy_installed():
+            ok, msg = apply_vscode_config(port)
+            if not ok:
+                QMessageBox.warning(self, "VSCode CodeBuddy 接入失败", msg)
 
         # 自动接入 CodeBuddy（需要开发者模式 + 重启生效）
         if is_codebuddy_installed():
@@ -1102,6 +1150,29 @@ class HotSwitchPage(QWidget):
                 "🔌 断开 WorkBuddy" if wb["pointed_to_us"] else "🔗 接入 WorkBuddy")
         except Exception:
             self._wb_label.setText("配置状态检测失败")
+
+        # Qoder / VSCode CodeBuddy 接入状态（2026-09-17）
+        try:
+            from ...modules.qoder_relay import (
+                get_qoder_config_state, get_vscode_config_state)
+            qo = get_qoder_config_state(port)
+            vs = get_vscode_config_state(port)
+            lines = []
+            if qo.get("installed"):
+                qo_ok = "✅" if qo.get("pointed_to_us") else "⚠️"
+                lines.append(f"{qo_ok} Qoder BYOK: {qo.get('byok_count', 0)}个模型{'（已指向中转）' if qo.get('pointed_to_us') else '（未接入）'}")
+            if vs.get("installed"):
+                vs_ok = "✅" if vs.get("pointed_to_us") else "⚠️"
+                vs_ep = vs.get("endpoint") or "官方默认"
+                lines.append(f"{vs_ok} VSCode CodeBuddy: {vs_ep}（重启VSCode生效）")
+            if hasattr(self, "_qoder_label"):
+                if lines:
+                    self._qoder_label.setText("\n".join(lines))
+                    self._qoder_label.setVisible(True)
+                else:
+                    self._qoder_label.setVisible(False)
+        except Exception:
+            pass  # 状态显示失败不影响功能
 
     # ═══════════ 上游 Key 池（仅 JWT，状态独立）═══════════
 
