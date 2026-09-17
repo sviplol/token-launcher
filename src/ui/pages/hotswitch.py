@@ -1824,17 +1824,14 @@ class HotSwitchPage(QWidget):
         dialog.exec()
 
     def _on_card_accounts_imported(self, accounts: list):
-        """卡密导入完成：走accounts页同款入库逻辑（Key池+账号表+group标记），完成后立即刷新本页"""
+        """卡密导入完成：Key池+账号表+group标记，完成后立即刷新本页
+
+        ★2026-09-17：账号管理已与一键接入融合（用户定案），此函数是唯一入库路径——
+        Key池(upstream_keys)是活跃账号事实源，accounts表是签到/积分数据底座（双写保留）。
+        """
         if not accounts:
             return
-        try:
-            # 复用账号管理的批量入库逻辑（写账号表+Key池+group）
-            from .accounts import AccountsPage
-            AccountsPage._on_batch_accounts_imported_page.__get__(self, AccountsPage)(accounts) \
-                if False else None
-        except Exception:
-            pass
-        # 直接内联同款逻辑（不依赖AccountsPage实例）
+        # 直接内联入库逻辑（不依赖已移除的AccountsPage）
         try:
             from ...modules.proxy_server import ProxyDatabase
             from ...utils.store import save_account
