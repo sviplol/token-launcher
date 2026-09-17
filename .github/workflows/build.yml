@@ -1,4 +1,4 @@
-﻿name: Build Token Launcher
+name: Build Token Launcher
 on:
   push:
     branches: [main]
