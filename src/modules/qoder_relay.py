@@ -15,8 +15,44 @@ import logging
 import os
 import shutil
 import sqlite3
+import sys
 
 logger = logging.getLogger(__name__)
+
+
+def _dpapi_encrypt(plaintext: str) -> bytes:
+    """Windows DPAPI 加密（Electron safeStorage 在 Windows 的底层实现）。
+
+    Qoder 的 byok_model_credentials.encrypted_payload 用 safeStorage.encryptString
+    加密，Windows 底层是 DPAPI CryptProtectData（当前用户作用域）。
+    Python 用 ctypes.windll.crypt32 复刻——同一用户进程能解密。
+    """
+    if sys.platform != "win32":
+        return plaintext.encode("utf-8")
+    import ctypes
+    from ctypes import wintypes
+
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    data = plaintext.encode("utf-8")
+    blob_in = DATA_BLOB(len(data), ctypes.cast(
+        ctypes.create_string_buffer(data, len(data)),
+        ctypes.POINTER(ctypes.c_char)))
+    blob_out = DATA_BLOB()
+    crypt32 = ctypes.windll.crypt32
+    if not crypt32.CryptProtectData(
+            ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)):
+        raise OSError("CryptProtectData failed")
+    enc = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+    return enc
+
+
+def _seal_credential(payload: dict) -> bytes:
+    """模拟 Electron safeStorage.encryptString(JSON.stringify(payload))"""
+    return _dpapi_encrypt(json.dumps(payload, ensure_ascii=False))
 
 # ============ Qoder 路径 ============
 _QODER_CANDIDATES = [
@@ -145,10 +181,22 @@ def apply_qoder_config(port: int, api_key: str = "antigravity-local") -> tuple:
     try:
         conn = sqlite3.connect(QODER_DB)
         conn.execute("BEGIN")
-        # 幂等：删旧注入行（含未登录时account_id=""的行）
+        # 幂等：删旧注入行（含 credentials）
         conn.execute(
             "DELETE FROM byok_model_profiles WHERE provider_key=?",
             (_QODER_PROVIDER_KEY,))
+        conn.execute(
+            "DELETE FROM byok_model_credentials WHERE profile_id LIKE ?",
+            (_QODER_PROFILE_PREFIX.replace("_", "\\_") + "%",).replace("\\%", "%") if False else
+            (_QODER_PROFILE_PREFIX + "%",))
+        # DPAPI 加密 credential payload（Qoder safeStorage 底层 = DPAPI）
+        try:
+            enc_payload = _seal_credential({"apiKey": api_key})
+            dpapi_ok = True
+        except Exception as e:
+            logger.warning(f"[Qoder] DPAPI加密失败(非Windows?)，credential用明文兜底: {e}")
+            enc_payload = json.dumps({"apiKey": api_key}).encode("utf-8")
+            dpapi_ok = False
         now_ms = int(__import__("time").time() * 1000)
         for idx, (model_key, display, is_reasoning) in enumerate(QODER_BYOK_MODELS):
             profile_id = f"{_QODER_PROFILE_PREFIX}{model_key}"
@@ -168,13 +216,21 @@ def apply_qoder_config(port: int, api_key: str = "antigravity-local") -> tuple:
                  json.dumps([200000, 400000, 1000000]), 1000000,
                  json.dumps(["minimal", "low", "medium", "high", "xhigh"]),
                  1, now_ms, now_ms))
+            # 写 credential（payload_version=1 = safeStorage/DPAPI 加密）
+            conn.execute(
+                """INSERT OR REPLACE INTO byok_model_credentials
+                (profile_id, account_id, payload_version, encrypted_payload,
+                 generation, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?)""",
+                (profile_id, account_id, 1, enc_payload, 1, now_ms, now_ms))
         conn.commit()
         conn.close()
-        logger.info(f"[Qoder] 已写入 {len(QODER_BYOK_MODELS)} 个 BYOK 模型 → {endpoint}（account_id={account_id or '空(未登录)'}）")
+        logger.info(f"[Qoder] 已写入 {len(QODER_BYOK_MODELS)} 个 BYOK 模型+credentials → {endpoint}"
+                    f"（account_id={account_id or '空(未登录)'}, DPAPI={'OK' if dpapi_ok else '明文兜底'}）")
         if not account_id:
             return True, (f"已写入 {len(QODER_BYOK_MODELS)} 个 BYOK 模型；"
                           "Qoder 尚未登录——登录后请重新点一次「启动接入」使其关联账户生效")
-        return True, f"已写入 {len(QODER_BYOK_MODELS)} 个 BYOK 模型（openai-compatible → {endpoint}）"
+        return True, f"已写入 {len(QODER_BYOK_MODELS)} 个 BYOK 模型+凭据（openai-compatible → {endpoint}）"
     except sqlite3.Error as e:
         logger.error(f"[Qoder] BYOK 写入失败: {e}")
         return False, f"BYOK 写入失败: {e}"
@@ -186,13 +242,16 @@ def restore_qoder_config() -> tuple:
         return True, "Qoder 未安装，无需还原"
     try:
         conn = sqlite3.connect(QODER_DB)
+        conn.execute(
+            "DELETE FROM byok_model_credentials WHERE profile_id LIKE ?",
+            (_QODER_PROFILE_PREFIX + "%",))
         cur = conn.execute(
             "DELETE FROM byok_model_profiles WHERE provider_key=?",
             (_QODER_PROVIDER_KEY,))
         n = cur.rowcount
         conn.commit()
         conn.close()
-        logger.info(f"[Qoder] 已还原（删除 {n} 个 BYOK 模型）")
+        logger.info(f"[Qoder] 已还原（删除 {n} 个 BYOK 模型+credentials）")
         return True, f"已还原（移除 {n} 个 BYOK 模型）"
     except sqlite3.Error as e:
         logger.error(f"[Qoder] BYOK 还原失败: {e}")
@@ -236,7 +295,12 @@ def get_vscode_config_state(port: int) -> dict:
 
 
 def apply_vscode_config(port: int) -> tuple:
-    """把 VSCode CodeBuddy 扩展端点指向本地中转（需重启 VSCode 生效）"""
+    """把 VSCode CodeBuddy 扩展端点指向本地中转
+
+    写 user settings 的 codingcopilot.endpoint 后，自动调用
+    `code --command "workbench.action.reloadWindow"` 热加载——
+    不需要手动重启 VSCode（CodeBuddy 扩展的 language client 会重新连接端点）。
+    """
     if not is_vscode_codebuddy_installed():
         return False, "未检测到 VSCode settings.json"
     try:
@@ -244,10 +308,29 @@ def apply_vscode_config(port: int) -> tuple:
         settings[VSCODE_CB_ENDPOINT_KEY] = f"http://127.0.0.1:{port}"
         _save_vscode_settings(settings)
         logger.info(f"[VSCode CodeBuddy] 端点已指向 http://127.0.0.1:{port}")
-        return True, "已写入（重启 VSCode 生效）"
+        # 尝试热加载（VSCode 在跑就 reload，没跑就跳过）
+        _try_vscode_reload()
+        return True, "已写入并尝试热加载（VSCode 窗口会自动刷新）"
     except OSError as e:
         logger.error(f"[VSCode CodeBuddy] 写入失败: {e}")
         return False, f"写入失败: {e}"
+
+
+def _try_vscode_reload():
+    """通过 VSCode CLI 发 Reload Window 命令（热加载 endpoint 变更）"""
+    import subprocess
+    import shutil as _sh
+    code_exe = _sh.which("code")
+    if not code_exe:
+        return  # VSCode 不在 PATH——跳过热加载（用户手动重启）
+    try:
+        subprocess.Popen(
+            [code_exe, "--command", "workbench.action.reloadWindow"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=0x08000000 if sys.platform == "win32" else 0)
+        logger.info("[VSCode CodeBuddy] 已发送 Reload Window 命令（热加载）")
+    except Exception as e:
+        logger.warning(f"[VSCode CodeBuddy] 热加载命令失败（用户需手动重启VSCode）: {e}")
 
 
 def restore_vscode_config() -> tuple:

@@ -414,7 +414,7 @@ class HotSwitchPage(QWidget):
         title.setObjectName("page_title")
         layout.addWidget(title)
 
-        subtitle = QLabel("点击下方按钮自动接入WorkBuddy和CodeBuddy，直接正常使用官方模型即可")
+        subtitle = QLabel("点击下方按钮自动接入 WorkBuddy / CodeBuddy / VSCode CodeBuddy / Qoder，全部走中转扣Key池积分")
         subtitle.setObjectName("page_subtitle")
         layout.addWidget(subtitle)
 
@@ -1164,7 +1164,7 @@ class HotSwitchPage(QWidget):
             if vs.get("installed"):
                 vs_ok = "✅" if vs.get("pointed_to_us") else "⚠️"
                 vs_ep = vs.get("endpoint") or "官方默认"
-                lines.append(f"{vs_ok} VSCode CodeBuddy: {vs_ep}（重启VSCode生效）")
+                lines.append(f"{vs_ok} VSCode CodeBuddy: {vs_ep}（自动热加载）")
             if hasattr(self, "_qoder_label"):
                 if lines:
                     self._qoder_label.setText("\n".join(lines))
