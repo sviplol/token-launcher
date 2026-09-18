@@ -3190,7 +3190,7 @@ class CardKeyFetchDialog(QDialog):
             "输入从网站购买的卡密（WK-XXXX-XXXX-XXXX-XXXX），自动验证并下载对应的账号包：\n"
             "  - 显示卡密包含的账号数量与积分总值（1 账号 = 2000 积分）\n"
             "  - 一键导入账号到本地（自动刷新积分 + 同步上游 Key 池 + 无感换号池）\n"
-            "  - 每张卡密仅可提取一次，下载后即标记为已使用"
+            "  - 可重复下载：绑定账号完整时免费重取（覆盖刷新本地，重复仅提示）"
         )
         hint.setObjectName("inline_hint")
         hint.setWordWrap(True)
@@ -3410,27 +3410,15 @@ class CardKeyFetchDialog(QDialog):
 
         need_count = int(self._card_info.get("account_count", 0) or 0)
         if local_count > 0 and local_count >= need_count and pool_has_card_accounts:
-            # 本地已完整存在 且 Key池也有 → 真拦（省下载次数）
-            self._progress_bar.setVisible(False)
+            # ★2026-09-18定案（用户）：本地有+Key池有也仅作提示，不拦截——
+            # 每次下载都全额下发覆盖（服务器绑定号完整时免计次，Key池按
+            # api_key去重插入天然防重复，不产生冗余数据）
             self._log_edit.setVisible(True)
-            self._append_log(f"✅ 该卡密的 {local_count} 个账号已完整在本地且Key池可用，无需重新下载")
-            self._append_log("💡 如需恢复账号，请勿清空Key池；清空后重新下载即可免费恢复（不计次）")
-            self._progress_label.setText(f"✅ 账号已在本地且在Key池（{local_count} 个），无需重新下载")
-            from PySide6.QtWidgets import QMessageBox as _MB
-            _MB.information(
-                self, "无需下载",
-                f"该卡密的 {local_count} 个账号已完整在本地且Key池可用，无需重新下载。\n\n"
-                "下载会消耗卡密的提取次数（共5次），已导入过的请直接使用。\n"
-                "提示：若清空了Key池，重新下载可免费恢复（不消耗次数）。"
-            )
-            self._btn_fetch.setEnabled(False)
-            self._btn_verify.setEnabled(False)
-            self._card_input.setEnabled(False)
-            self._btn_close.setEnabled(True)
-            return
-        if local_count > 0:
-            # 本地有部分（少于应得数量）——提示但不阻断（可能是上次导入中断）
-            self._append_log(f"⚠️ 本地已有该卡密的部分账号（{local_count}/{need_count} 个），将继续下载补齐")
+            self._append_log(
+                f"ℹ️ 本地已有该卡密的 {local_count} 个账号且在Key池——本次将重新下载覆盖刷新")
+        elif local_count > 0:
+            self._append_log(
+                f"ℹ️ 本地已有该卡密的部分账号（{local_count}/{need_count} 个）——本次全额下载覆盖")
 
         self._btn_fetch.setEnabled(False)
         self._btn_verify.setEnabled(False)
@@ -3540,38 +3528,23 @@ class CardKeyFetchDialog(QDialog):
             self._reset_ui()
             return
 
-        # 账号去重：只看Key池（唯一"活跃账号"事实源）
-        # ★2026-09-17定案（用户）：账号管理已与一键接入融合，Key池(upstream_keys)是唯一入口。
-        # accounts表退化为签到/积分等功能的历史数据底座，不参与下载去重——
-        # 否则清空Key池后重新下载会被accounts表历史uid拦截（v9.10.6已修的双判定问题），
-        # 现在彻底简化：Key在池=真重复跳过；Key不在池=放行（入库侧按api_key去重插入，无重复风险）。
-        key_pool_tokens = set()
-        pool_ok = False
+        # ★2026-09-18定案（用户）：重复仅提示，全额导入覆盖。
+        # Key池（upstream_keys）是唯一活跃账号事实源——入库侧按 api_key
+        # 去重插入（池里已有的不重复插），accounts 表 UPSERT 覆盖更新，
+        # 重复下载不产生冗余数据。每次下载都是全量覆盖刷新。
         try:
             from ...modules.proxy_server import ProxyDatabase as _PDB
             _pdb = _PDB.get_instance()
             key_pool_tokens = {k.get("api_key", "") for k in _pdb.get_upstream_keys()}
-            pool_ok = True
         except Exception:
-            pool_ok = False  # Key池不可用→全部放行（宁可重复入池也不拦下载）
-
-        if pool_ok:
-            dup_count = 0
-            new_accounts = []
-            for a in accounts:
-                ak = a.get("api_key", "") or a.get("auth_token", "")
-                if ak and ak in key_pool_tokens:
-                    dup_count += 1  # Key已在池=真重复
-                else:
-                    new_accounts.append(a)
-            if dup_count > 0:
-                self._append_log(f"⚠️ {dup_count} 个账号已在Key池（跳过）")
-            if not new_accounts:
-                self._progress_label.setText(f"❌ {dup_count} 个账号已在Key池，无需重复导入")
-                self._append_log(f"❌ 该卡密的账号已全部在Key池中，无需重复下载")
-                self._reset_ui()
-                return
-            accounts = new_accounts
+            key_pool_tokens = set()
+        dup_count = sum(
+            1 for a in accounts
+            if (a.get("api_key", "") or a.get("auth_token", "")) in key_pool_tokens
+        )
+        if dup_count > 0:
+            self._append_log(
+                f"ℹ️ {dup_count}/{len(accounts)} 个账号已在Key池（重复仅提示，本次全额覆盖刷新）")
 
         self._progress_bar.setValue(80)
         self._progress_label.setText(f"📥 正在保存 {len(accounts)} 个账号...")
@@ -3587,7 +3560,8 @@ class CardKeyFetchDialog(QDialog):
         verify_fail = []
         try:
             import sqlite3 as _sql
-            conn = _sql.connect(db_path)
+            from ...utils.store import _get_db_path as _dbp_verify
+            conn = _sql.connect(str(_dbp_verify()))
             c = conn.cursor()
             for acc in accounts:
                 uid = acc.get("uid", "")
