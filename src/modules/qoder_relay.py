@@ -255,24 +255,80 @@ _QODER_PROVIDER_KEY = "antigravity-relay"
 _QODER_PROFILE_PREFIX = "ag-relay-"
 
 
-def _qoder_get_account_id() -> str:
-    """从 account_profiles 表读当前登录账户 id（BYOK 行的 account_id 外键）"""
-    conn = sqlite3.connect(QODER_DB)
-    try:
-        row = conn.execute(
-            "SELECT account_id FROM account_profiles ORDER BY rowid DESC LIMIT 1"
-        ).fetchone()
-        return str(row[0]) if row else ""
-    except sqlite3.Error:
-        # 表不存在（未登录）时兜底：BYOK 表里已有行的 account_id
+def _dpapi_decrypt(data: bytes):
+    """DPAPI 解密（CryptUnprotectData，当前用户作用域）"""
+    import ctypes
+    from ctypes import wintypes
+
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    blob_in = DATA_BLOB(len(data), ctypes.cast(
+        ctypes.create_string_buffer(data, len(data)),
+        ctypes.POINTER(ctypes.c_char)))
+    blob_out = DATA_BLOB()
+    if not ctypes.windll.crypt32.CryptUnprotectData(
+            ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)):
+        return None
+    out = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+    return out
+
+
+def _qoder_read_account_id() -> str:
+    """读 Qoder 登录账户真实 account_id。
+
+    优先链（2026-09-19修正——之前只查 account_profiles 表，CN 版该表
+    不写导致 account_id 为空，BYOK 行 Qoder 匹配不上 → 模型列表空）：
+    1. auth.v1.dat（Electron os_crypt v10 = AES-GCM，key 在 Local State
+       的 os_crypt.encrypted_key 经 DPAPI 解出）→ user.id
+    2. main.sqlite 的 account_profiles 兜底
+    3. catalog 缓存目录名（~/.qoder-cn/.models/<uid>/）兜底
+    """
+    data_dir = os.path.dirname(QODER_DB) if QODER_DB else ""
+    # ① auth.v1.dat（v10 AES-GCM）
+    if data_dir:
+        auth_path = os.path.join(data_dir, "auth.v1.dat")
         try:
-            row = conn.execute(
-                "SELECT account_id FROM byok_model_profiles LIMIT 1").fetchone()
-            return str(row[0]) if row else ""
-        except sqlite3.Error:
-            return ""
-    finally:
-        conn.close()
+            with open(auth_path, "rb") as f:
+                auth_raw = f.read()
+            with open(os.path.join(data_dir, "Local State"), "r", encoding="utf-8") as f:
+                ls = json.load(f)
+            import base64
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            enc_key = base64.b64decode(ls["os_crypt"]["encrypted_key"])[5:]
+            aes_key = _dpapi_decrypt(enc_key)
+            if auth_raw[:3] == b"v10" and aes_key:
+                plain = AESGCM(aes_key).decrypt(auth_raw[3:15], auth_raw[15:], None)
+                user = json.loads(plain.decode("utf-8")).get("user", {})
+                uid = str(user.get("id", "")).strip()
+                if uid:
+                    return uid
+        except Exception as e:
+            logger.debug(f"[Qoder] auth.v1.dat 解析失败: {e}")
+    # ② account_profiles 表
+    try:
+        row = sqlite3.connect(QODER_DB).execute(
+            "SELECT account_id FROM account_profiles LIMIT 1").fetchone()
+        if row and str(row[0]).strip():
+            return str(row[0]).strip()
+    except sqlite3.Error:
+        pass
+    # ③ catalog 缓存目录名兜底
+    if data_dir:
+        models_dir = os.path.join(os.path.dirname(data_dir), ".qoder-cn", ".models")
+        try:
+            for name in os.listdir(models_dir):
+                if name != "default" and len(name) >= 30 and "-" in name:
+                    return name
+        except OSError:
+            pass
+    return ""
+
+
+def _qoder_get_account_id() -> str:
+    """读当前登录账户真实 account_id（auth.v1.dat 主链 + 双兜底）"""
+    return _qoder_read_account_id()
 
 
 def get_qoder_config_state(port: int) -> dict:
