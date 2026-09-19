@@ -50,9 +50,19 @@ def _dpapi_encrypt(plaintext: str) -> bytes:
     return enc
 
 
-def _seal_credential(payload: dict) -> bytes:
-    """模拟 Electron safeStorage.encryptString(JSON.stringify(payload))"""
-    return _dpapi_encrypt(json.dumps(payload, ensure_ascii=False))
+def _seal_credential(api_key: str) -> bytes:
+    """复刻 Qoder het.seal：protectString(JSON.stringify({schemaVersion:1, apiKey}))
+
+    Electron safeStorage 在 Windows 的输出格式（Chromium os_crypt_win）：
+    4字节头(01 00 00 00 = v1/DPAPI) + CryptProtectData 密文。
+    （2026-09-19修正：之前裸DPAPI密文+缺schemaVersion——Qoder读credential
+    解析失败导致 byokModels 列表为空，模型显示"已失效"）
+    """
+    payload = json.dumps({"schemaVersion": 1, "apiKey": api_key}, ensure_ascii=False)
+    dpapi = _dpapi_encrypt(payload)
+    if sys.platform == "win32":
+        return b"\x01\x00\x00\x00" + dpapi
+    return dpapi
 
 # ============ Qoder 官方模型解锁补丁（2026-09-18，用户定案：强行可选冻结模型） ============
 # 老账户官方模型目录（服务端下发 platformModels）里 enabled=false（冻结），
@@ -319,7 +329,7 @@ def apply_qoder_config(port: int, api_key: str = "antigravity-local") -> tuple:
             (_QODER_PROFILE_PREFIX + "%",))
         # DPAPI 加密 credential payload（Qoder safeStorage 底层 = DPAPI）
         try:
-            enc_payload = _seal_credential({"apiKey": api_key})
+            enc_payload = _seal_credential(api_key)
             dpapi_ok = True
         except Exception as e:
             logger.warning(f"[Qoder] DPAPI加密失败(非Windows?)，credential用明文兜底: {e}")
