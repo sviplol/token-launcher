@@ -84,6 +84,11 @@ _V1_OPENAI_PREFIXES = (
     "/v1/videos/generations",
 )
 
+# Qoder daemon（http transport）的模型前缀——model_server 的全部路径
+# chat=/model/v1/chat/completions，模型目录=/model/v1/models（目录请求
+# 不能转发腾讯上游——需本地返回我们的模型列表，见 handler 内处理）
+_QODER_MODEL_PREFIX = "/model/v1/"
+
 # ============ Qoder 模型映射（2026-09-17，基于本机 WorkBuddy models.json 实测ID） ============
 # Qoder 用户在 BYOK 里填原生模型名，中转改写为上游实际模型 ID 再转发——
 # 计费统一走 Key 池积分。
@@ -757,6 +762,26 @@ class CodeBuddyRelayServer:
             def _relay(self):
                 path = self.path
                 upstream_path = _normalize_upstream_path(path)
+
+                # Qoder daemon（http transport）的模型目录请求——本地返回
+                # 模型列表（OpenAI /v1/models 格式），不转发腾讯上游。
+                # 目录内容 = QODER_MODEL_MAP 的全部映射源模型（Qoder 原生名）。
+                if path.startswith(_QODER_MODEL_PREFIX) and "models" in path:
+                    models_list = [
+                        {"id": mk, "object": "model", "owned_by": "local-relay"}
+                        for mk in QODER_MODEL_MAP.keys()
+                    ]
+                    body = json.dumps(
+                        {"object": "list", "data": models_list},
+                        ensure_ascii=False).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    server_ref._record_event(False, "Qoder模型目录响应")
+                    return
+
                 swap = _is_swap_path(upstream_path)
                 body = self._read_body()
                 # Qoder BYOK 模型映射（qwen→hunyuan 等，命中映射表才改写）
