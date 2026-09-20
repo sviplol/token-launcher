@@ -325,6 +325,8 @@ class CodeBuddyRelayServer:
         self.db = ProxyDatabase.get_instance()
         self.router = ProxyRouter(self.db)
         self._httpd: Optional[_ThreadingHTTPServer] = None
+        self._httpsd = None
+        self._https_thread = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
         # 上游连接池
@@ -349,15 +351,24 @@ class CodeBuddyRelayServer:
             return True
         try:
             handler = self._make_handler()
-            # TLS 证书存在时升级为 HTTPS（Qoder daemon 无感通道需要 https://）
+            # 8003 保持纯 HTTP（WorkBuddy/CodeBuddy CN 已验证链路——绝不能动）
+            self._httpd = _ThreadingHTTPServer((self.host, self.port), handler)
+            # HTTPS 旁路端口（+1）：Qoder daemon 无感通道专用
+            # （单端口无法同时听明文HTTP和TLS——分端口最稳）
+            self._httpsd = None
             cert = os.path.join(os.path.expanduser("~"), ".token-relay", "tls", "server.pem")
             key = os.path.join(os.path.expanduser("~"), ".token-relay", "tls", "server.key")
             if os.path.isfile(cert) and os.path.isfile(key):
-                self._httpd = _ThreadingHTTPSServer(
-                    (self.host, self.port), handler, cert, key)
-                logger.info(f"[CodeBuddy中转] HTTPS 模式启动（Qoder 无感通道就绪）")
-            else:
-                self._httpd = _ThreadingHTTPServer((self.host, self.port), handler)
+                try:
+                    self._httpsd = _ThreadingHTTPSServer(
+                        (self.host, self.port + 1), handler, cert, key)
+                    self._https_thread = threading.Thread(
+                        target=self._httpsd.serve_forever, daemon=True)
+                    self._https_thread.start()
+                    logger.info(f"[CodeBuddy中转] HTTPS 旁路已启动 "
+                                f"https://127.0.0.1:{self.port + 1}（Qoder 无感通道）")
+                except OSError as e:
+                    logger.warning(f"[CodeBuddy中转] HTTPS 旁路启动失败: {e}")
         except OSError as e:
             logger.error(f"[CodeBuddy中转] 端口 {self.port} 启动失败: {e}")
             return False
@@ -377,6 +388,13 @@ class CodeBuddyRelayServer:
         except Exception as e:
             logger.error(f"[CodeBuddy中转] 停止异常: {e}")
         self._httpd = None
+        if getattr(self, "_httpsd", None):
+            try:
+                self._httpsd.shutdown()
+                self._httpsd.server_close()
+            except Exception as e:
+                logger.error(f"[CodeBuddy中转] HTTPS旁路停止异常: {e}")
+            self._httpsd = None
         with self._status_lock:
             self._current_key = {}
             self._last_event = "已停止"

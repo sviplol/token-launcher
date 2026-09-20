@@ -116,7 +116,7 @@ def apply_qoder_seamless(port: int) -> tuple:
     try:
         subprocess.run(["setx", QODER_TRANSPORT_ENV, "http"],
                        capture_output=True, timeout=15, check=True)
-        subprocess.run(["setx", QODER_HOST_ENV, f"127.0.0.1:{port}"],
+        subprocess.run(["setx", QODER_HOST_ENV, f"127.0.0.1:{port + 1}"],
                        capture_output=True, timeout=15, check=True)
         subprocess.run(["setx", "NODE_EXTRA_CA_CERTS", CERT_FILE],
                        capture_output=True, timeout=15, check=True)
@@ -147,7 +147,7 @@ def get_qoder_seamless_state(port: int) -> dict:
         r = subprocess.run(
             ["reg", "query", "HKCU\\Environment", "/v", QODER_HOST_ENV],
             capture_output=True, text=True, timeout=10)
-        enabled = QODER_HOST_ENV in r.stdout and f"127.0.0.1:{port}" in r.stdout
+        enabled = QODER_HOST_ENV in r.stdout and f"127.0.0.1:{port + 1}" in r.stdout
         return {"enabled": enabled,
                 "cert_trusted": os.path.isfile(CERT_FILE)}
     except Exception:
