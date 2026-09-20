@@ -979,22 +979,12 @@ class HotSwitchPage(QWidget):
                     is_qoder_installed, apply_qoder_config,
                     patch_qoder_unlock, qoder_unlock_patch_status,
                     is_vscode_codebuddy_installed, apply_vscode_config)
-                # Qoder 官方模型无感接入（2026-09-19：env+TLS零文件修改方案——
-                # daemon的http传输模式打中转，官方模型选中即接管）
-                try:
-                    from ...modules.qoder_seamless import (
-                        apply_qoder_seamless, get_qoder_seamless_state)
-                    _seamless = get_qoder_seamless_state(port)
-                    if not _seamless.get("enabled"):
-                        _sok, _smsg = apply_qoder_seamless(port)
-                        if _sok:
-                            logging.getLogger(__name__).info(
-                                f"[Qoder无感] {_smsg}——重启Qoder后官方模型走中转")
-                        else:
-                            logging.getLogger(__name__).warning(
-                                f"[Qoder无感] 配置失败: {_smsg}")
-                except Exception:
-                    logging.getLogger(__name__).exception("[Qoder无感] 配置异常")
+                # Qoder 官方模型无感接入（2026-09-20：默认关闭——
+                # env方案会让daemon从model_server拉模型目录，官方目录丢失
+                # 导致"无可用模型"。BYOK通道（真实account_id+正确credential）
+                # 已完全可用，走"自定义"类目即无感。无感env仅手动开启实验）
+                # 默认不自动apply——如需开启在设置里手动操作
+                pass
                 # Qoder BYOK（静默——无弹窗）
                 if is_qoder_installed():
                     apply_qoder_config(port)
