@@ -929,6 +929,12 @@ class HotSwitchPage(QWidget):
                 ok, msg = restore_vscode_config()
                 if not ok:
                     QMessageBox.warning(self, "还原 VSCode CodeBuddy 配置失败", msg)
+            # Qoder 无感接入还原（2026-09-19：删env回官方直连）
+            try:
+                from ...modules.qoder_seamless import restore_qoder_seamless
+                restore_qoder_seamless()
+            except Exception:
+                pass
             self._refresh_status()
             return
 
@@ -973,6 +979,22 @@ class HotSwitchPage(QWidget):
                     is_qoder_installed, apply_qoder_config,
                     patch_qoder_unlock, qoder_unlock_patch_status,
                     is_vscode_codebuddy_installed, apply_vscode_config)
+                # Qoder 官方模型无感接入（2026-09-19：env+TLS零文件修改方案——
+                # daemon的http传输模式打中转，官方模型选中即接管）
+                try:
+                    from ...modules.qoder_seamless import (
+                        apply_qoder_seamless, get_qoder_seamless_state)
+                    _seamless = get_qoder_seamless_state(port)
+                    if not _seamless.get("enabled"):
+                        _sok, _smsg = apply_qoder_seamless(port)
+                        if _sok:
+                            logging.getLogger(__name__).info(
+                                f"[Qoder无感] {_smsg}——重启Qoder后官方模型走中转")
+                        else:
+                            logging.getLogger(__name__).warning(
+                                f"[Qoder无感] 配置失败: {_smsg}")
+                except Exception:
+                    logging.getLogger(__name__).exception("[Qoder无感] 配置异常")
                 # Qoder BYOK（静默——无弹窗）
                 if is_qoder_installed():
                     apply_qoder_config(port)

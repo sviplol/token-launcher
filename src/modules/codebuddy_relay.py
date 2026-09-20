@@ -58,6 +58,12 @@ SWAP_PATHS_PREFIX = (
     "/v2/videos/tasks",
 )
 
+# Qoder daemon 私有头（转发腾讯上游会触发安全拦截——request illegal）
+_QODER_STRIP_HEADERS = {
+    "x-request-id", "x-session-id", "x-machine-id", "x-client-type",
+    "x-task-id", "x-qcs-request-id", "x-feature-gate",
+}
+
 # WorkBuddy 内嵌 CLI 的 OpenAI 客户端把 CODEBUDDY_BASE_URL 原样当 baseURL
 # （不像内部 v2 客户端会补 /v2），所以它的请求是不带版本前缀的裸路径，
 # 直接打上游会 302 到别的域名导致 CLI 失败。这里统一补上 /v2 再转发。
@@ -103,35 +109,54 @@ QODER_MODEL_MAP = {
 
 
 def _map_qoder_model(body: bytes) -> bytes:
-    """Qoder BYOK 请求体的 model 字段改写（qwen→hunyuan 等），失败原样返回"""
+    """Qoder daemon 请求体清洗：模型映射 + 剥离 Qoder 私有扩展字段。
+
+    http transport 模式的请求带 metadata/custom_model/patches 等 Qoder
+    私有字段——腾讯上游安全策略对未知字段返回 request illegal，
+    转发前剥掉（研究实证：剥后即标准 OpenAI Chat Completions）。
+    """
     if not body:
         return body
     try:
         data = json.loads(body.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
         return body
-    model = data.get("model")
-    if not isinstance(model, str):
+    if not isinstance(data, dict):
         return body
-    mapped = QODER_MODEL_MAP.get(model)
-    if not mapped or mapped == model:
+    changed = False
+    for k in ("metadata", "custom_model", "patches"):
+        if k in data:
+            del data[k]
+            changed = True
+    model = data.get("model")
+    if isinstance(model, str):
+        mapped = QODER_MODEL_MAP.get(model)
+        if mapped and mapped != model:
+            data["model"] = mapped
+            changed = True
+            logger.info(f"[CodeBuddy中转] 模型映射: {model} → {mapped}（Qoder）")
+    if not changed:
         return body
     try:
-        data["model"] = mapped
-        new_body = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        logger.info(f"[CodeBuddy中转] 模型映射: {model} → {mapped}（Qoder BYOK）")
-        return new_body
+        return json.dumps(data, ensure_ascii=False).encode("utf-8")
     except (ValueError, TypeError):
         return body
 
 
 def _normalize_upstream_path(path: str) -> str:
-    """裸 OpenAI 路径补 /v2 前缀；/v1 前缀归一到 /v2；其余原样"""
+    """裸 OpenAI 路径补 /v2 前缀；/v1 前缀归一到 /v2；其余原样
+
+    Qoder daemon（QODER_MODEL_TRANSPORT=http 模式）发的是
+    /model/v1/chat/completions——归一到 /v2/chat/completions 走计费换token
+    （2026-09-19：Qoder官方模型无感接入通道）。
+    """
     p = urlsplit(path).path
     if p.startswith(_BARE_OPENAI_PREFIXES):
         return "/v2" + path
     if p in _V1_OPENAI_PREFIXES:
         return path.replace("/v1/", "/v2/", 1)
+    if p.startswith("/model/v1/"):
+        return path.replace("/model/v1/", "/v2/", 1)
     return path
 
 # 请求侧需要剥掉的 hop-by-hop 头
@@ -257,6 +282,34 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     allow_reuse_address = True
 
 
+class _ThreadingHTTPSServer(ThreadingMixIn, HTTPServer):
+    """HTTPS 中转（Qoder daemon 无感通道：https://127.0.0.1:8003/model/v1/...）
+
+    自签证书经 qoder_seamless 生成并导入 Windows 信任后，
+    daemon 的 fetch 信任本机中转——零文件修改接管官方模型 chat。
+    """
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, addr, handler, certfile, keyfile):
+        import ssl as _ssl
+        self._ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+        self._ctx.load_cert_chain(certfile, keyfile)
+        super().__init__(addr, handler)
+
+    def get_request(self):
+        sock, addr = super().get_request()
+        try:
+            return self._ctx.wrap_socket(sock, server_side=True), addr
+        except Exception:
+            # TLS 握手失败（如健康探测发来明文 HTTP）——静默丢弃
+            try:
+                sock.close()
+            except OSError:
+                pass
+            raise
+
+
 class CodeBuddyRelayServer:
     """CodeBuddy 透明中转服务（与 ProxyServer 同款生命周期接口）"""
 
@@ -291,7 +344,15 @@ class CodeBuddyRelayServer:
             return True
         try:
             handler = self._make_handler()
-            self._httpd = _ThreadingHTTPServer((self.host, self.port), handler)
+            # TLS 证书存在时升级为 HTTPS（Qoder daemon 无感通道需要 https://）
+            cert = os.path.join(os.path.expanduser("~"), ".token-relay", "tls", "server.pem")
+            key = os.path.join(os.path.expanduser("~"), ".token-relay", "tls", "server.key")
+            if os.path.isfile(cert) and os.path.isfile(key):
+                self._httpd = _ThreadingHTTPSServer(
+                    (self.host, self.port), handler, cert, key)
+                logger.info(f"[CodeBuddy中转] HTTPS 模式启动（Qoder 无感通道就绪）")
+            else:
+                self._httpd = _ThreadingHTTPServer((self.host, self.port), handler)
         except OSError as e:
             logger.error(f"[CodeBuddy中转] 端口 {self.port} 启动失败: {e}")
             return False
@@ -737,6 +798,15 @@ class CodeBuddyRelayServer:
                     tag = f"换号[{label}]" if is_switch else f"消耗[{label}]"
                     headers = self._build_upstream_headers(
                         auth_override=f"Bearer {api_key}")
+                    # 伪装真实客户端 UA（python-requests UA 会被腾讯上游
+                    # 风控层拦截 request illegal——2026-09-19实测）
+                    headers["User-Agent"] = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                             "CodeBuddy/5.5.6 Chrome/128.0.0.0 Safari/537.36")
+                    # 剥离 Qoder daemon 私有头（X-Request-ID/X-Session-ID 等——
+                    # 腾讯上游安全策略对非标头返回 request illegal）
+                    for _qh in list(headers.keys()):
+                        if _qh.lower() in _QODER_STRIP_HEADERS:
+                            del headers[_qh]
                     # body 里的真身会话/ACP id 同步替换为改写后的值
                     fwd_body = _scrub_body_identity(body, headers, self.headers)
 
