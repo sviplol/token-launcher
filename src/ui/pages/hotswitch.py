@@ -272,6 +272,11 @@ class HotSwitchPage(QWidget):
         # Key池→accounts表自动同步（签到页数据源）：池里有号但accounts表缺的，反哺入库
         QTimer.singleShot(1500, self._sync_pool_to_accounts)
 
+        # 首屏立即刷Key池（修复首次打开列表空白——之前要等2秒定时器或手动刷新）
+        QTimer.singleShot(50, self._refresh_pool)
+        QTimer.singleShot(600, self._refresh_pool)  # 双保险：数据晚到再刷一次
+        QTimer.singleShot(2000, self._refresh_pool)
+
     def _sync_pool_to_accounts(self):
         """把上游Key池里的号反哺到flash.db accounts表（签到页/积分明细的数据源）。
 
