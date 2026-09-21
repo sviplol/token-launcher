@@ -73,8 +73,11 @@ def _gen_self_signed_cert() -> tuple:
     return CERT_FILE, KEY_FILE
 
 
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW：防cmd黑框
+
+
 def trust_cert_in_windows() -> tuple:
-    """把自签证书导入 Windows 信任存储（CurrentUser\\CA——无确认弹窗）"""
+    """把自签证书导入 Windows 信任存储（CurrentUser\\CA——无确认弹窗、无黑框）"""
     _gen_self_signed_cert()
     ps_cmd = (
         "Import-Certificate -FilePath "
@@ -83,14 +86,16 @@ def trust_cert_in_windows() -> tuple:
     try:
         r = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_cmd],
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, timeout=30,
+            creationflags=_NO_WINDOW)
         if r.returncode == 0:
             logger.info("[Qoder无感] 证书已导入当前用户CA信任存储（无弹窗）")
             return True, "证书已信任（当前用户CA）"
         # CA失败兜底LocalMachine Root（需管理员）
         r2 = subprocess.run(
             ["certutil", "-addstore", "Root", CERT_FILE],
-            capture_output=True, text=True, timeout=20)
+            capture_output=True, text=True, timeout=20,
+            creationflags=_NO_WINDOW)
         if r2.returncode == 0:
             return True, "证书已信任（本机Root，管理员）"
         return False, f"证书导入失败: {r.stderr or r2.stderr}"
@@ -98,28 +103,38 @@ def trust_cert_in_windows() -> tuple:
         return False, f"导入异常: {e}"
 
 
+_CERT_TRUSTED_CACHE = False  # 进程级缓存：证书已信任就不再跑 powershell（防每次点接入卡30秒）
+
+
 def apply_qoder_seamless(port: int) -> tuple:
     """开启 Qoder 官方模型无感接入（零文件修改）
 
-    1. 确保 TLS 证书存在且被信任
-    2. setx 两个环境变量（用户级，永久）
+    1. 确保 TLS 证书存在且被信任（幂等：信任过就跳过，防卡顿）
+    2. setx 三个环境变量（用户级，永久）
     3. 提示重启 Qoder 生效
     """
-    # 证书
-    ok, msg = trust_cert_in_windows()
-    if not ok:
-        logger.warning(f"[Qoder无感] 证书信任失败: {msg}")
-        return False, f"证书信任失败: {msg}（尝试右键以管理员运行本程序）"
+    global _CERT_TRUSTED_CACHE
+    # 证书（只在没信任过时才跑导入——powershell子进程是卡顿元凶）
+    if not _CERT_TRUSTED_CACHE:
+        if not (os.path.isfile(CERT_FILE) and os.path.isfile(KEY_FILE)):
+            ok, msg = trust_cert_in_windows()
+            if not ok:
+                logger.warning(f"[Qoder无感] 证书信任失败: {msg}")
+                return False, f"证书信任失败: {msg}（尝试右键以管理员运行本程序）"
+        _CERT_TRUSTED_CACHE = True
     # 环境变量（用户级永久；NODE_EXTRA_CA_CERTS让daemon的Node信任自签证书——
     # Electron AS_NODE 模式不读 Windows store，必须用 Node 原生 CA 扩展变量，
     # 该变量经 buildEnv() 透传实证不在删除列表）
     try:
         subprocess.run(["setx", QODER_TRANSPORT_ENV, "http"],
-                       capture_output=True, timeout=15, check=True)
+                       capture_output=True, timeout=15, check=True,
+                       creationflags=_NO_WINDOW)
         subprocess.run(["setx", QODER_HOST_ENV, f"127.0.0.1:{port + 1}"],
-                       capture_output=True, timeout=15, check=True)
+                       capture_output=True, timeout=15, check=True,
+                       creationflags=_NO_WINDOW)
         subprocess.run(["setx", "NODE_EXTRA_CA_CERTS", CERT_FILE],
-                       capture_output=True, timeout=15, check=True)
+                       capture_output=True, timeout=15, check=True,
+                       creationflags=_NO_WINDOW)
     except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
         return False, f"环境变量写入失败: {e}"
     logger.info(f"[Qoder无感] 环境变量已设置: {QODER_TRANSPORT_ENV}=http, "
@@ -134,7 +149,8 @@ def restore_qoder_seamless() -> tuple:
         for var in (QODER_TRANSPORT_ENV, QODER_HOST_ENV, "NODE_EXTRA_CA_CERTS"):
             subprocess.run(
                 ["reg", "delete", "HKCU\\Environment", "/v", var, "/f"],
-                capture_output=True, timeout=15)
+                capture_output=True, timeout=15,
+                creationflags=_NO_WINDOW)
         logger.info("[Qoder无感] 环境变量已删除（Qoder 重启后回官方直连）")
         return True, "已还原（重启 Qoder 后恢复官方直连）"
     except (OSError, subprocess.TimeoutExpired) as e:

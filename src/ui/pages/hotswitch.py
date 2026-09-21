@@ -859,6 +859,24 @@ class HotSwitchPage(QWidget):
         if not server.start():
             return
         self._relay_server = server
+        # 同步按钮/状态到"已开启"（否则用户看到"启动接入"按钮点下去
+        # 实际是停止——2026-09-21实测踩坑）
+        if hasattr(self, "_toggle_btn"):
+            self._toggle_btn.setText("⏹ 停止接入（消耗自己账号）")
+            self._toggle_btn.setStyleSheet("""
+                QPushButton {
+                    background: #C0271D; color: #FFFFFF; border: 2px solid #C0271D;
+                    border-radius: 14px; font-size: 20px; font-weight: 800;
+                    padding: 14px 32px;
+                }
+                QPushButton:hover { background: #A01F17; }
+            """)
+        if hasattr(self, "_status_label"):
+            self._status_label.setText("✅ 接入服务已开启")
+            self._status_label.setStyleSheet("font-size: 16px; font-weight: 700; color: #10B981;")
+        if hasattr(self, "_url_label"):
+            self._url_label.setText(f"中转地址: http://127.0.0.1:{port}")
+            self._url_label.setVisible(True)
         # 客户端未安装时静默跳过（不弹窗不打错误日志）
         if is_codebuddy_installed():
             apply_client_config(port)
