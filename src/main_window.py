@@ -17,7 +17,7 @@ from .utils.store import init_db, load_setting
 
 logger = logging.getLogger(__name__)
 
-VERSION = "9.12.3"
+VERSION = "9.12.4"
 
 
 class MainWindow(QMainWindow):
