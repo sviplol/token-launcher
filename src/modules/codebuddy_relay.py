@@ -1179,12 +1179,13 @@ WB_ENV_KEY = "CODEBUDDY_BASE_URL"
 # 不看 models.json（聊天才看）。需要 patch CLI 双文件的 prepareRequest，
 # 让媒体请求读 WB_MEDIA_URL env（幂等开关：env存在走中转，不存在走官方）。
 
-# CLI 双文件路径（两个都要patch，加载哪个取决于 CODEBUDDY_FORCE_HEADLESS_BUNDLE）
+# CLI 文件路径（5.6.2 起 codebuddy.js 已移除，只 patch 存在的文件）
 if _sys.platform == "win32":
     _pf = os.environ.get("ProgramFiles", r"C:\Program Files")
     CLI_FILES = [
         os.path.join(_pf, "WorkBuddy", "resources", "app.asar.unpacked", "cli", "dist", "codebuddy-headless.js"),
         os.path.join(_pf, "WorkBuddy", "resources", "app.asar.unpacked", "cli", "dist", "codebuddy.js"),
+        os.path.join(_pf, "WorkBuddy", "resources", "app.asar.unpacked", "cli", "dist", "codebuddy-lite-wb.mjs"),
     ]
 elif _sys.platform == "darwin":
     CLI_FILES = [
@@ -1193,6 +1194,52 @@ elif _sys.platform == "darwin":
     ]
 else:
     CLI_FILES = []
+
+# ===== 5.6.2 版 prepareRequest patch 串（2026-09-22：WorkBuddy 5.6.2 重构——
+# 混淆变量变化+新增(0,ln.Gp)()全局auth。旧串失效导致更新后媒体链路丢失。
+# 文件在 unpacked 目录=独立散文件，非等长替换安全）=====
+CLI_PATCH_PAIRS_V2 = [
+    # (原生串, patch串)——1号（带identityHeaders：媒体/上传链路）
+    ('async prepareRequest(){let L=(0,ln.Gp)(),ei=this.authenticationManager.currentSessionSubject.getValue()?.auth,'
+     'ea=L?.auth?.accessToken??ei?.accessToken;if(!ea)throw Error("Authentication required. Please login first.");'
+     'let es={...ei,accessToken:ea},el=(0,ln.I2)(),ec=(await this.productManager.waitConfiguration()).endpoint;'
+     'if(!ec)throw Error("Base endpoint not configured.");return{auth:es,endpoint:ec,identityHeaders:el}}',
+     'async prepareRequest(){let eN=process.env.WB_MEDIA_URL||"",L=(0,ln.Gp)(),'
+     'ei=this.authenticationManager.currentSessionSubject.getValue()?.auth,'
+     'ea=L?.auth?.accessToken??ei?.accessToken;'
+     'if(!ea)throw Error("Authentication required. Please login first.");'
+     'let es={...ei,accessToken:ea},el=(0,ln.I2)(),'
+     'ec=eN||(await this.productManager.waitConfiguration()).endpoint;'
+     'if(!ec)throw Error("Base endpoint not configured.");'
+     'return{auth:es,endpoint:ec,identityHeaders:el}}'),
+    # 2号（纯净版：其他服务链路）
+    ('async prepareRequest(){let L=this.authenticationManager.currentSessionSubject.getValue()?.auth,'
+     'ei=(0,ln.Gp)()?.auth?.accessToken??L?.accessToken;if(!ei)throw Error("Authentication required. Please login first.");'
+     'let ea={...L,accessToken:ei},es=(await this.productManager.waitConfiguration()).endpoint;'
+     'if(!es)throw Error("Base endpoint not configured.");return{auth:ea,endpoint:es}}',
+     'async prepareRequest(){let eN=process.env.WB_MEDIA_URL||"",'
+     'L=this.authenticationManager.currentSessionSubject.getValue()?.auth,'
+     'ei=(0,ln.Gp)()?.auth?.accessToken??L?.accessToken;'
+     'if(!ei)throw Error("Authentication required. Please login first.");'
+     'let ea={...L,accessToken:ei},es=eN||(await this.productManager.waitConfiguration()).endpoint;'
+     'if(!es)throw Error("Base endpoint not configured.");return{auth:ea,endpoint:es}}'),
+    # 3号（lite-wb.mjs 的 1号变体：混淆名 cT 系——带identityHeaders）
+    ('async prepareRequest(){let ei=(0,cT.Gp)(),ea=this.authenticationManager.currentSessionSubject.getValue()?.auth,'
+     'es=ei?.auth?.accessToken??ea?.accessToken;if(!es)throw Error("Authentication required. Please login first.");'
+     'let el={...ea,accessToken:es},ec=(0,cT.I2)(),eu=(await this.productManager.waitConfiguration()).endpoint;',
+     'async prepareRequest(){let eN=process.env.WB_MEDIA_URL||"",ei=(0,cT.Gp)(),'
+     'ea=this.authenticationManager.currentSessionSubject.getValue()?.auth,'
+     'es=ei?.auth?.accessToken??ea?.accessToken;if(!es)throw Error("Authentication required. Please login first.");'
+     'let el={...ea,accessToken:es},ec=(0,cT.I2)(),'
+     'eu=eN||(await this.productManager.waitConfiguration()).endpoint;'),
+    # 4号（lite-wb.mjs 的 2号变体：纯净版）
+    ('async prepareRequest(){let ei=this.authenticationManager.currentSessionSubject.getValue()?.auth,'
+     'ea=(0,cT.Gp)()?.auth?.accessToken??ei?.accessToken;if(!ea)throw Error("Authentication required. Please login first.");',
+     'async prepareRequest(){let eN=process.env.WB_MEDIA_URL||"",'
+     'ei=this.authenticationManager.currentSessionSubject.getValue()?.auth,'
+     'ea=(0,cT.Gp)()?.auth?.accessToken??ei?.accessToken;'
+     'if(!ea)throw Error("Authentication required. Please login first.");'),
+]
 
 # 原生 prepareRequest（在 CLI 里恰好出现2次：ImageServiceImpl/VideoServiceImpl 各一处）
 CLI_NATIVE_SNIPPET = (
@@ -1266,18 +1313,19 @@ def cli_patch_status() -> dict:
 
 
 def patch_cli_files() -> tuple:
-    """patch CLI 双文件（幂等：已patch跳过；原生串必须恰好2次，不是2次中止防误伤）
+    """patch CLI 文件（v2：兼容5.6.2新版+旧版；幂等；每处串出现1次才patch防误伤）
 
-    WorkBuddy 升级会还原这两个文件 → 调用方可定期用 cli_patch_status() 检测，
+    WorkBuddy 升级会还原这些文件 → 调用方可定期用 cli_patch_status() 检测，
     缺失则重新调本函数（一键修复）。
+    v2逻辑（2026-09-22）：先试5.6.2新串（CLI_PATCH_PAIRS_V2，逐对独立判定），
+    再试旧串（CLI_NATIVE_SNIPPET，老版本兼容）。
     """
     if not CLI_FILES:
         return False, "当前平台不支持 CLI patch"
     patched_count = 0
     for fp in CLI_FILES:
         if not os.path.exists(fp):
-            logger.warning(f"[媒体patch] 文件不存在，跳过: {fp}")
-            continue
+            continue  # 5.6.2 移除了 codebuddy.js——不存在的文件静默跳过
         try:
             with open(fp, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
@@ -1285,32 +1333,45 @@ def patch_cli_files() -> tuple:
             return False, f"读取失败: {os.path.basename(fp)}: {e}"
         if "process.env.WB_MEDIA_URL" in content:
             patched_count += 1
-            continue  # 已patch（我们或一键部署工具打的，幂等跳过）
-        n_native = content.count(CLI_NATIVE_SNIPPET)
-        if n_native != 2:
-            # 不是2次说明版本变了或已被改过，中止防误伤
-            return False, (f"{os.path.basename(fp)} 原生代码出现{n_native}次(应为2)，"
-                           f"疑似版本更新，为防误伤已中止")
-        # 备份原文件（.orig放同目录，跟一键部署工具惯例一致）
+            continue  # 已patch（幂等跳过）
+        changed = False
+        # v2新串（5.6.2）：逐对检查（每对出现1次）
+        for native, patched in CLI_PATCH_PAIRS_V2:
+            n = content.count(native)
+            if n == 1:
+                content = content.replace(native, patched)
+                changed = True
+            elif n > 1:
+                return False, (f"{os.path.basename(fp)} v2串出现{n}次(应为1)，中止防误伤")
+        # 旧串（5.6.2之前版本）：出现2次
+        if not changed and CLI_NATIVE_SNIPPET in content:
+            n_native = content.count(CLI_NATIVE_SNIPPET)
+            if n_native != 2:
+                return False, (f"{os.path.basename(fp)} 旧串出现{n_native}次(应为2)，"
+                               f"疑似版本更新，为防误伤已中止")
+            content = content.replace(CLI_NATIVE_SNIPPET, CLI_PATCHED_SNIPPET)
+            changed = True
+        if not changed:
+            continue  # 本文件没有可patch串（可能是不含媒体逻辑的lite版）
+        # 备份原文件（.orig放同目录）
         orig = fp + ".orig"
         if not os.path.exists(orig):
             try:
                 shutil.copy2(fp, orig)
             except OSError as e:
                 return False, f"备份失败: {e}"
-        new_content = content.replace(CLI_NATIVE_SNIPPET, CLI_PATCHED_SNIPPET)
         try:
             tmp = fp + ".tmp-patch"
             with open(tmp, "w", encoding="utf-8") as f:
-                f.write(new_content)
+                f.write(content)
             os.replace(tmp, fp)
         except OSError as e:
             return False, f"写入失败: {os.path.basename(fp)}: {e}"
         patched_count += 1
-        logger.info(f"[媒体patch] {os.path.basename(fp)} patch成功(2处→走WB_MEDIA_URL)")
+        logger.info(f"[媒体patch] {os.path.basename(fp)} patch成功(v2多串→走WB_MEDIA_URL)")
     if patched_count == 0:
         return False, "未找到可patch的CLI文件（WorkBuddy未安装？）"
-    return True, f"CLI patch完成({patched_count}/2文件)"
+    return True, f"CLI patch完成({patched_count}文件)"
 
 
 def is_workbuddy_installed() -> bool:
