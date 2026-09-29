@@ -263,6 +263,23 @@ class HotSwitchPage(QWidget):
         # Tab切换时立即刷新对应内容（切到日志Tab秒出最新事件）
         self._tab_widget.currentChanged.connect(self._on_tab_changed)
 
+        # ★settings漂移即时守护（2026-09-22加固：WorkBuddy保存自身设置会丢
+        # 我们写的env键——2秒定时器补回有窗口期，窗口期内用户请求直连官方
+        # 扣自己积分。用QFileSystemWatcher监听settings.json变更，保存瞬间
+        # 立即补回，窗口期从2秒缩到毫秒级）
+        try:
+            from PySide6.QtCore import QFileSystemWatcher
+            import os as _os
+            self._wb_settings_watcher = QFileSystemWatcher(self)
+            _wb_dir = _os.path.expanduser("~/.workbuddy")
+            if _os.path.isdir(_wb_dir):
+                self._wb_settings_watcher.addPaths([
+                    _os.path.join(_wb_dir, "settings.json"), _wb_dir])
+                self._wb_settings_watcher.fileChanged.connect(self._on_wb_settings_changed)
+                self._wb_settings_watcher.directoryChanged.connect(self._on_wb_settings_changed)
+        except Exception:
+            pass  # Watcher失败不影响主功能（还有2秒定时器兜底）
+
         # 首次启动自动生成专属接入 Key（随机 sk，不可自定义）
         self._ensure_hotswitch_key()
 
@@ -1117,6 +1134,37 @@ class HotSwitchPage(QWidget):
         if idx == 0:
             self._refresh_pool()
         self._refresh_log()  # 日志始终刷新（轮询relay的deque，轻量操作）
+
+    def _on_wb_settings_changed(self, *_args):
+        """settings.json 被 WorkBuddy 保存覆盖的瞬间——立即检查+补回env键
+
+        ★2026-09-22加固：老逻辑2秒定时器补回有窗口期（保存→定时器→补回），
+        WorkBuddy在窗口期发起的请求直连官方扣用户积分。Watcher毫秒级补回。
+        只在中转运行中+接入标记开着时补（用户点了停止就不动）。
+        """
+        try:
+            if not (self._relay_server and self._relay_server.is_running):
+                return  # 中转没开——不动（用户可能故意停了）
+            if load_setting("codebuddy_relay_wb_enabled", "0") != "1":
+                return  # WorkBuddy接入标记关着——不动
+            port = int(load_setting("codebuddy_relay_port", "8003") or "8003")
+            from ...modules.codebuddy_relay import (
+                get_workbuddy_config_state, apply_workbuddy_config)
+            wb = get_workbuddy_config_state(port)
+            if not wb["pointed_to_us"]:
+                apply_workbuddy_config(port)
+                logging.getLogger(__name__).warning(
+                    "[即时守护] WorkBuddy 保存设置时丢掉了接入端点——已瞬间补回（不扣用户官方积分）")
+                # QFileSystemWatcher监听的文件被替换后可能失效——重新添加
+                try:
+                    import os as _os
+                    sp = _os.path.expanduser("~/.workbuddy/settings.json")
+                    if sp not in self._wb_settings_watcher.files():
+                        self._wb_settings_watcher.addPath(sp)
+                except Exception:
+                    pass
+        except Exception:
+            logging.getLogger(__name__).debug("[即时守护] 检查异常（忽略）")
 
     def apply_theme(self):
         """主题切换时刷新页面内硬编码颜色（跟随极简黑白主题）"""
