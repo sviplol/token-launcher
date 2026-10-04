@@ -333,6 +333,11 @@ class ApiClient:
         url = f"{BILLING_API_BASE}{path}"
         transient_statuses = {408, 429, 500, 502, 503, 504}
         max_attempts = 3
+        # ★2026-10-04修复：user_resource 必须带分页参数——
+        # 腾讯对该接口无分页参数的请求返回403"请求不合法"（实测page_size=1通过），
+        # 之前 json={} 全被403 → 积分查询失败 → Key池积分不刷新（用户看到旧值600）
+        if "user_resource" in path and not body:
+            body = {"page": 1, "page_size": 1}
 
         for attempt in range(1, max_attempts + 1):
             try:

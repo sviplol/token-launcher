@@ -1888,7 +1888,7 @@ class ProxyDatabase:
             try:
                 import requests
                 url = f"https://copilot.tencent.com{BILLING_QUERY_PATH}"
-                resp = requests.post(url, json={}, headers=_build_workbuddy_relay_headers(api_key), timeout=10)
+                resp = requests.post(url, json={"page": 1, "page_size": 1}, headers=_build_workbuddy_relay_headers(api_key), timeout=10)
                 if resp.status_code == 200:
                     data = resp.json()
                     # 兼容两种响应结构：
