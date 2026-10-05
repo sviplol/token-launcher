@@ -231,7 +231,7 @@ def _need_force_update(current: str, min_ver: str) -> bool:
         return False
 
 
-UPDATE_URL = "https://2bbb.lanzou.com/b04oxedod"
+UPDATE_URL = "https://2bbb.lanzout.com/b04oxedod"
 
 
 def _show_force_update_dialog(min_ver: str):
