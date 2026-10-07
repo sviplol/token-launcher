@@ -120,6 +120,15 @@ def _migrate_db():
             conn.execute("ALTER TABLE accounts ADD COLUMN ck TEXT DEFAULT ''")
         if "api_key" not in columns:
             conn.execute("ALTER TABLE accounts ADD COLUMN api_key TEXT DEFAULT ''")
+        # token保活标记列（2026-10-07：RT续期调度用，照抄原项目2.4.10规则）
+        if "token_refresh_at" not in columns:
+            conn.execute("ALTER TABLE accounts ADD COLUMN token_refresh_at TEXT DEFAULT ''")
+        if "token_refresh_fails" not in columns:
+            conn.execute("ALTER TABLE accounts ADD COLUMN token_refresh_fails INTEGER DEFAULT 0")
+        if "token_needs_relogin" not in columns:
+            conn.execute("ALTER TABLE accounts ADD COLUMN token_needs_relogin INTEGER DEFAULT 0")
+        if "token_relogin_reason" not in columns:
+            conn.execute("ALTER TABLE accounts ADD COLUMN token_relogin_reason TEXT DEFAULT ''")
         conn.commit()
     finally:
         conn.close()
@@ -141,6 +150,7 @@ def _row_to_account(row: sqlite3.Row) -> Account:
         auth_raw=row["auth_raw"],
         ck=row["ck"] if "ck" in row.keys() else "",
         api_key=row["api_key"] if "api_key" in row.keys() else "",
+        token_needs_relogin=bool(row["token_needs_relogin"]) if "token_needs_relogin" in row.keys() else False,
         profile_raw=row["profile_raw"],
         usage_raw=row["usage_raw"],
         checkin=CheckinInfo(
@@ -290,6 +300,38 @@ def update_account_tokens(uid: str, access_token: str, refresh_token: str = ""):
             "UPDATE accounts SET auth_token = ?, auth_raw = ? WHERE uid = ?",
             (access_token, json.dumps(raw), uid),
         )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def record_token_refresh(uid: str, success: bool, rejected: bool = False, reason: str = ""):
+    """记录一次 token 续期结果（照抄原项目2.4.10/TraeWorkAssistant语义）。
+
+    success=True  → 清零失败计数、解除需重登录标记、写最近续期时间；
+    success=False 且 rejected=True（服务端明确拒绝/4xx）→ 标记 token_needs_relogin；
+    success=False 且 rejected=False（网络/5xx/解析异常）→ 只累计失败次数，不判死。
+    """
+    from datetime import datetime as _dt
+    conn = get_connection()
+    try:
+        if success:
+            conn.execute(
+                "UPDATE accounts SET token_refresh_at = ?, token_refresh_fails = 0,"
+                " token_needs_relogin = 0, token_relogin_reason = '' WHERE uid = ?",
+                (_dt.now().isoformat(), uid),
+            )
+        elif rejected:
+            conn.execute(
+                "UPDATE accounts SET token_refresh_fails = token_refresh_fails + 1,"
+                " token_needs_relogin = 1, token_relogin_reason = ? WHERE uid = ?",
+                (reason or "RT被服务端拒绝", uid),
+            )
+        else:
+            conn.execute(
+                "UPDATE accounts SET token_refresh_fails = token_refresh_fails + 1 WHERE uid = ?",
+                (uid,),
+            )
         conn.commit()
     finally:
         conn.close()

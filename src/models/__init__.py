@@ -161,6 +161,8 @@ class Account:
     usage_raw: str = ""
     checkin: CheckinInfo = field(default_factory=CheckinInfo)
     quota: QuotaInfo = field(default_factory=QuotaInfo)
+    # token保活标记（2026-10-07：RT续期调度用，照抄原项目2.4.10规则）
+    token_needs_relogin: bool = False
     created_at: Optional[datetime] = None
     last_used: Optional[datetime] = None
 

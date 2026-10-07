@@ -106,6 +106,12 @@ def _force_cleanup():
     - 下次开软件 autostart 又拉起中转 → CLI 打过来 → 扣卡密积分（用户以为没接入）
     """
     global _main_window
+    # 停止账号 token 保活调度线程（2026-10-07：RT续期调度）
+    try:
+        from .modules.token_keepalive import keepalive_scheduler
+        keepalive_scheduler.stop()
+    except Exception:
+        pass
     if _main_window:
         # 停止代理服务器
         try:
@@ -669,6 +675,15 @@ def main():
         _single_instance_server.newConnection.connect(_on_new_connection)
 
     logger.info("Token接入器 已启动")
+
+    # 启动账号 token 保活调度线程（2026-10-07照抄原项目2.4.10/TraeWorkAssistant
+    # wb-renew：每天定时兜底续期——AT剩<24h用RT刷新，最大化延续账号生命周期；
+    # 成功自动同步上游Key池旧token换新，中转无感切换）
+    try:
+        from .modules.token_keepalive import keepalive_scheduler
+        keepalive_scheduler.start()
+    except Exception as e:
+        logger.warning(f"[保活] 调度线程启动失败: {e}")
 
     # 运行 Qt 事件循环
     ret = app.exec()
