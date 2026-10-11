@@ -1239,6 +1239,41 @@ CLI_PATCH_PAIRS_V2 = [
      'ei=this.authenticationManager.currentSessionSubject.getValue()?.auth,'
      'ea=(0,cT.Gp)()?.auth?.accessToken??ei?.accessToken;'
      'if(!ea)throw Error("Authentication required. Please login first.");'),
+    # ★5号（5.7.7 headless 1号变体：lv 系——带identityHeaders，2026-10-11实测锚串）
+    ('async prepareRequest(){let L=(0,lv.Gp)(),ei=this.authenticationManager.currentSessionSubject.getValue()?.auth,'
+     'ea=L?.auth?.accessToken??ei?.accessToken;if(!ea)throw Error("Authentication required. Please login first.");'
+     'let es={...ei,accessToken:ea},el=(0,lv.I2)(),ec=(await this.productManager.waitConfiguration()).endpoint;'
+     'if(!ec)throw Error("Base endpoint not configured.");return{auth:es,endpoint:ec,identityHeaders:el}}',
+     'async prepareRequest(){let eN=process.env.WB_MEDIA_URL||"",L=(0,lv.Gp)(),'
+     'ei=this.authenticationManager.currentSessionSubject.getValue()?.auth,'
+     'ea=L?.auth?.accessToken??ei?.accessToken;'
+     'if(!ea)throw Error("Authentication required. Please login first.");'
+     'let es={...ei,accessToken:ea},el=(0,lv.I2)(),'
+     'ec=eN||(await this.productManager.waitConfiguration()).endpoint;'
+     'if(!ec)throw Error("Base endpoint not configured.");'
+     'return{auth:es,endpoint:ec,identityHeaders:el}}'),
+    # ★6号（5.7.7 headless 2号变体：lv 系纯净版）
+    ('async prepareRequest(){let L=this.authenticationManager.currentSessionSubject.getValue()?.auth,'
+     'ei=(0,lv.Gp)()?.auth?.accessToken??L?.accessToken;if(!ei)throw Error("Authentication required. Please login first.");'
+     'let ea={...L,accessToken:ei},es=(await this.productManager.waitConfiguration()).endpoint;'
+     'if(!es)throw Error("Base endpoint not configured.");return{auth:ea,endpoint:es}}',
+     'async prepareRequest(){let eN=process.env.WB_MEDIA_URL||"",'
+     'L=this.authenticationManager.currentSessionSubject.getValue()?.auth,'
+     'ei=(0,lv.Gp)()?.auth?.accessToken??L?.accessToken;'
+     'if(!ei)throw Error("Authentication required. Please login first.");'
+     'let ea={...L,accessToken:ei},es=eN||(await this.productManager.waitConfiguration()).endpoint;'
+     'if(!es)throw Error("Base endpoint not configured.");return{auth:ea,endpoint:es}}'),
+    # ★7号（5.7.7 lite-wb.mjs 变体：lU 系纯净版，t/i/n/s 短变量名）
+    ('async prepareRequest(){let t=this.authenticationManager.currentSessionSubject.getValue()?.auth,'
+     'i=(0,lU.Gp)()?.auth?.accessToken??t?.accessToken;if(!i)throw Error("Authentication required. Please login first.");'
+     'let n={...t,accessToken:i},s=(await this.productManager.waitConfiguration()).endpoint;'
+     'if(!s)throw Error("Base endpoint not configured.");return{auth:n,endpoint:s}}',
+     'async prepareRequest(){let eN=process.env.WB_MEDIA_URL||"",'
+     't=this.authenticationManager.currentSessionSubject.getValue()?.auth,'
+     'i=(0,lU.Gp)()?.auth?.accessToken??t?.accessToken;'
+     'if(!i)throw Error("Authentication required. Please login first.");'
+     'let n={...t,accessToken:i},s=eN||(await this.productManager.waitConfiguration()).endpoint;'
+     'if(!s)throw Error("Base endpoint not configured.");return{auth:n,endpoint:s}}'),
 ]
 
 # 原生 prepareRequest（在 CLI 里恰好出现2次：ImageServiceImpl/VideoServiceImpl 各一处）
@@ -1293,8 +1328,15 @@ def _save_json_file_atomic(path: str, data: dict):
 
 
 def cli_patch_status() -> dict:
-    """检测 CLI 双文件的 patch 状态（GUI展示+一键修复用）"""
+    """检测 CLI 双文件的 patch 状态（GUI展示+一键修复用）
+
+    ★2026-10-11修复：all_patched 判定忽略"官方已移除"的文件——
+    5.7.7 删除了 codebuddy.js，旧判定要求全部 CLI_FILES patched，
+    不存在的文件永远拖累 all_patched=False（GUI误报"未patch"）。
+    新规则：存在的文件全部 patched 且至少1个存在 → all_patched=True。
+    """
     result = {"files": [], "all_patched": True, "any_exists": False}
+    existing_patched = 0
     for fp in CLI_FILES:
         exists = os.path.exists(fp)
         patched = False
@@ -1306,9 +1348,13 @@ def cli_patch_status() -> dict:
                 patched = "process.env.WB_MEDIA_URL" in c
             except OSError:
                 pass
-        if not (exists and patched):
-            result["all_patched"] = False
+            if patched:
+                existing_patched += 1
+            else:
+                result["all_patched"] = False
         result["files"].append({"path": fp, "exists": exists, "patched": patched})
+    if not result["any_exists"] or existing_patched == 0:
+        result["all_patched"] = False
     return result
 
 
@@ -1466,6 +1512,117 @@ def _clear_media_env_from_settings(path: str) -> bool:
     return changed
 
 
+# ═══════════ 5.77 models.json 接入（2026-10-11） ═══════════
+# 5.7.7 的 resolveModelBaseURL 优先级：models.json 模型级 url > customization > env > 官方endpoint。
+# 旧版只写 settings.json env 即可接管全部请求；5.77 里 models.json 存在 url 的模型
+# 会绕过 env 直连其 url（历史遗留 glm.2bbb.cn 或官方），导致"不走咱们软件的积分"。
+# 接入=把两个 models.json（~/.workbuddy + ~/.codebuddy）的所有模型 url 改指本地中转；
+# 停止=删掉我们写入的 url/apiKey（模型回退官方 endpoint）。
+# ★写入用临时文件+os.replace：WorkBuddy 运行中可能持有 .workbuddy/models.json 句柄，
+# 直接 open(w) 会 PermissionError；replace 在被锁时也失败但不伤原文件，静默跳过。
+
+WB_MODELS_BACKUP_SUFFIX = ".bak-antigravity"
+
+
+def _wb_models_paths() -> list:
+    paths = []
+    for d in ("~/.workbuddy", "~/.codebuddy"):
+        p = os.path.join(os.path.expanduser(d), "models.json")
+        if os.path.exists(p):
+            paths.append(p)
+    return paths
+
+
+def _relay_sub_key() -> str:
+    """本地中转的访问Key（sub_api_keys里is_active的第一个sk-）"""
+    try:
+        from .proxy_server import ProxyDatabase
+        db = ProxyDatabase.get_instance()
+        subs = db._data.get("sub_api_keys", [])  # noqa: SLF001（同包内部访问，结构稳定）
+        for k in subs:
+            if k.get("is_active") and str(k.get("api_key", "")).startswith("sk-"):
+                return str(k["api_key"])
+    except Exception:
+        pass
+    return ""
+
+
+def apply_wb_models_urls(port: int) -> tuple:
+    """把两个 models.json 的所有模型 url 指向本地中转（apiKey=本地中转sub key）"""
+    base = f"http://127.0.0.1:{port}/v1"
+    sub_key = _relay_sub_key()
+    if not sub_key:
+        return False, "本地中转无可用 API Key（请先在 API 代理页生成）"
+    ok, locked = 0, []
+    for p in _wb_models_paths():
+        data = _load_json_file(p)
+        models = data.get("models")
+        if not isinstance(models, list):
+            continue
+        changed = False
+        for m in models:
+            if not isinstance(m, dict):
+                continue
+            if m.get("url") != base:
+                m["url"] = base
+                m["apiKey"] = sub_key
+                changed = True
+        if not changed:
+            ok += 1
+            continue
+        try:
+            if not os.path.exists(p + WB_MODELS_BACKUP_SUFFIX):
+                shutil.copy2(p, p + WB_MODELS_BACKUP_SUFFIX)
+            tmp = p + ".tmp-antigravity"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, p)
+            ok += 1
+            logger.info(f"[5.77接入] models.json 已指向中转: {p}")
+        except PermissionError:
+            locked.append(os.path.dirname(p))
+        except OSError as e:
+            logger.warning(f"[5.77接入] 写 {p} 失败: {e}")
+    if ok == 0:
+        return False, "models.json 全部被 WorkBuddy 锁定，请完全退出 WorkBuddy 后重试"
+    msg = f"models.json 已指向中转({ok}/{len(_wb_models_paths())}个文件)"
+    if locked:
+        msg += f"；{','.join(locked)} 被占用（WorkBuddy重启后自动生效）"
+    return True, msg
+
+
+def clear_wb_models_urls() -> bool:
+    """停止接入：把 models.json 的 url 恢复为官方（删除 url/apiKey 字段→模型走官方endpoint）"""
+    changed_any = False
+    for p in _wb_models_paths():
+        data = _load_json_file(p)
+        models = data.get("models")
+        if not isinstance(models, list):
+            continue
+        changed = False
+        for m in models:
+            if not isinstance(m, dict):
+                continue
+            u = str(m.get("url", ""))
+            if u.startswith("http://127.0.0.1:"):
+                m.pop("url", None)
+                m.pop("apiKey", None)
+                changed = True
+        if changed:
+            try:
+                tmp = p + ".tmp-antigravity"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, p)
+                changed_any = True
+                logger.info(f"[5.77停止] models.json url 已还原官方: {p}")
+            except PermissionError:
+                logger.warning(f"[5.77停止] {p} 被 WorkBuddy 锁定，重启后生效")
+            except OSError as e:
+                logger.warning(f"[5.77停止] 写 {p} 失败: {e}")
+    return changed_any
+
+
 def apply_workbuddy_config(port: int) -> tuple:
     """把 WorkBuddy 的聊天+媒体端点全部指向本地中转（新会话生效，不用重启）
 
@@ -1485,6 +1642,11 @@ def apply_workbuddy_config(port: int) -> tuple:
         ok_cb = _write_media_env_to_settings(CODEBUDDY_DOT_SETTINGS_PATH, port)
     if not ok_wb:
         return False, "写入 settings.json 失败"
+    # 1.5 ★5.77：models.json 模型 url 指向中转（5.77 里模型级 url 优先于 env，
+    # 不改 models.json 的话带 url 的模型全部绕过中转直连——"不走积分"根因）
+    models_ok, models_msg = apply_wb_models_urls(port)
+    if not models_ok:
+        logger.warning(f"[5.77接入] models.json 未接管: {models_msg}")
     # 2. patch CLI 双文件（幂等）
     patch_ok, patch_msg = patch_cli_files()
     if not patch_ok:
@@ -1493,6 +1655,10 @@ def apply_workbuddy_config(port: int) -> tuple:
         logger.info(f"[媒体链路] {patch_msg}")
     logger.info(f"[WorkBuddy配置] 聊天+媒体端点已指向 http://127.0.0.1:{port}（settings双目录）")
     msg = "已写入，WorkBuddy 新会话生效（聊天+图片+视频全部走中转）"
+    if models_ok:
+        msg += f"；5.77 models.json 已接管（{models_msg}）"
+    else:
+        msg += f"；注意: models.json 未接管（{models_msg}）"
     if not patch_ok:
         msg += f"；注意: CLI patch未完成（{patch_msg}），图片/视频可能仍走官方"
     return True, msg
@@ -1512,6 +1678,14 @@ def restore_workbuddy_config(restart_wb: bool = True) -> tuple:
         if os.path.exists(CODEBUDDY_DOT_SETTINGS_PATH):
             changed2 = _clear_media_env_from_settings(CODEBUDDY_DOT_SETTINGS_PATH)
             changed = changed or changed2
+        # ★5.77（2026-10-11）：models.json 的 url 也还原官方——
+        # 5.77 里模型级 url 优先级最高，只清 settings env 的话 models.json
+        # 的 url 还指着中转，请求照样打 8003
+        try:
+            models_cleared = clear_wb_models_urls()
+            changed = changed or models_cleared
+        except Exception as e:
+            logger.warning(f"[5.77停止] models.json 还原异常: {e}")
         logger.info("[WorkBuddy配置] 端点配置已还原（聊天+媒体，双目录；CLI patch保留幂等无副作用）")
         # 重启 WorkBuddy（杀旧进程，让 CLI 重读 settings.json）
         if restart_wb and changed:
@@ -1529,13 +1703,30 @@ def restore_workbuddy_config(restart_wb: bool = True) -> tuple:
                     import time as _t
                     _t.sleep(2)
                     try:
-                        wb_exe = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "WorkBuddy", "WorkBuddy.exe")
+                        # ★5.77适配（2026-10-11）：新版装在 Program Files\WorkBuddy，
+                        # 旧版在 LOCALAPPDATA\Programs\WorkBuddyAI（注意目录名不同）。
+                        # 依次探测三个路径，找到第一个存在的——修"停止接入后WorkBuddy闪退不重启"
+                        wb_exe = None
+                        _cands = [
+                            os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "WorkBuddy", "WorkBuddy.exe"),
+                            os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "WorkBuddyAI", "WorkBuddyAI.exe"),
+                            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "WorkBuddy", "WorkBuddy.exe"),
+                            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "WorkBuddyAI", "WorkBuddyAI.exe"),
+                        ]
+                        for _c in _cands:
+                            if _c and os.path.exists(_c):
+                                wb_exe = _c
+                                break
                         if sys.platform != "win32":
                             wb_exe = "/Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy"
-                        if os.path.exists(wb_exe):
+                        if wb_exe and os.path.exists(wb_exe):
                             subprocess.Popen([wb_exe], start_new_session=True,
                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            logger.info("[WorkBuddy配置] WorkBuddy 已重新启动（官方端点）")
+                            logger.info(f"[WorkBuddy配置] WorkBuddy 已重新启动（官方端点）: {wb_exe}")
+                        else:
+                            # 全部候选路径都不存在（无法自动重启）——记error级日志，
+                            # GUI用户能看到 WorkBuddy 被杀未拉起的真实原因
+                            logger.error("[WorkBuddy配置] 未找到 WorkBuddy.exe，无法自动重启——请手动启动 WorkBuddy")
                     except OSError as e:
                         logger.warning(f"[WorkBuddy配置] 重启 WorkBuddy 失败: {e}")
                 threading.Thread(target=_relaunch, daemon=True).start()
