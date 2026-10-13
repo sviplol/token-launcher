@@ -706,6 +706,14 @@ class CodeBuddyRelayServer:
                 headers["Accept-Encoding"] = "identity"
                 if auth_override:
                     headers["Authorization"] = auth_override
+                    # ★2026-10-13修复（401 invalid_format根因）：WorkBuddy 5.7.7 的
+                    # OpenAI SDK 用 apiKey 时会同时发 Authorization 和 X-API-Key 两个头。
+                    # 只换 Authorization 的话 X-API-Key 还带着本地 sub key（sk-开头）
+                    # 传给官方——官方看到两种凭据冲突返回 401 invalid_format。
+                    # 修复：换 token 时删掉 X-API-Key（官方走 Authorization Bearer JWT）。
+                    for k in list(headers):
+                        if k.lower() == "x-api-key":
+                            del headers[k]
                     # 换 token 必须同步换身份：X-User-Id 改成池子账号的 uid
                     # （2026-08-09 抓包实锤 CLI 会带真身 X-User-Id，不同步则
                     # 单请求内 token 与 X-User-Id 身份矛盾，等于自曝）
@@ -1547,8 +1555,33 @@ def _relay_sub_key() -> str:
     return ""
 
 
+# 5.7.7 服务器新增的 chat 模型（2026-10-13 实测产品配置快照提取）——
+# 这些模型不在用户旧 models.json 的16个里：不补进 models.json 的话，
+# CLI 端 resolveModelBaseURL 走 env/官方路径，要么报 Authentication required
+# 要么烧官方积分。接入时统一补齐（url=本地中转 + sub key）。
+WB_EXTRA_MODEL_IDS = [
+    "kimi-k2.8-preview",   # 5.77 新增
+    "deepseek-v4.1-flash", # 5.77 新增
+    "kimi-k3-1",
+    "hy3-x",
+    "hy3-b",
+    "hy3-c",
+    "minimax-m2.7",
+    "minimax-m2.5",
+    "glm-4.6",
+    "glm-4.6v",
+    "deepseek-v4-flash",
+    "kimi-k2-thinking",
+    "deepseek-v3-2-volc",
+]
+
+
 def apply_wb_models_urls(port: int) -> tuple:
-    """把两个 models.json 的所有模型 url 指向本地中转（apiKey=本地中转sub key）"""
+    """把两个 models.json 的所有模型 url 指向本地中转（apiKey=本地中转sub key）
+
+    ★2026-10-13 v2：同时把 5.77 服务器新增模型补进 models.json（缺的追加），
+    保证新模型（kimi-k2.8-preview / deepseek-v4.1-flash 等）也走中转。
+    """
     base = f"http://127.0.0.1:{port}/v1"
     sub_key = _relay_sub_key()
     if not sub_key:
@@ -1560,6 +1593,7 @@ def apply_wb_models_urls(port: int) -> tuple:
         if not isinstance(models, list):
             continue
         changed = False
+        existing_ids = {str(m.get("id", "")) for m in models if isinstance(m, dict)}
         for m in models:
             if not isinstance(m, dict):
                 continue
@@ -1567,6 +1601,21 @@ def apply_wb_models_urls(port: int) -> tuple:
                 m["url"] = base
                 m["apiKey"] = sub_key
                 changed = True
+        # 补齐 5.77 新增模型（已存在的不动，缺的追加）
+        added = []
+        for mid in WB_EXTRA_MODEL_IDS:
+            if mid in existing_ids:
+                continue
+            models.append({
+                "id": mid, "name": mid, "vendor": "ainb",
+                "url": base, "apiKey": sub_key,
+                "supportsToolCall": True, "supportsImages": True,
+                "maxInputTokens": 200000, "maxOutputTokens": 32000,
+            })
+            added.append(mid)
+            changed = True
+        if added:
+            logger.info(f"[5.77接入] 补齐新增模型 {added} → {p}")
         if not changed:
             ok += 1
             continue
@@ -1580,7 +1629,15 @@ def apply_wb_models_urls(port: int) -> tuple:
             ok += 1
             logger.info(f"[5.77接入] models.json 已指向中转: {p}")
         except PermissionError:
-            locked.append(os.path.dirname(p))
+            # ★2026-10-13 加固：WorkBuddy 运行中锁住 .workbuddy/models.json 时
+            # os.replace 被拒——退回 Copy-Item 式流式覆写（open(w) 直接覆盖实测可过）
+            try:
+                with open(p, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                ok += 1
+                logger.info(f"[5.77接入] models.json 已指向中转(覆写模式): {p}")
+            except PermissionError:
+                locked.append(os.path.dirname(p))
         except OSError as e:
             logger.warning(f"[5.77接入] 写 {p} 失败: {e}")
     if ok == 0:
