@@ -1,4 +1,4 @@
-﻿"""Token接入器 主窗口 v9.9.8 — 极简黑白主题 + 日落自动切换"""
+﻿"""Token接入器 主窗口 v9.16.0 — 极简黑白主题 + 日落自动切换"""
 
 import logging, os, sys
 from PySide6.QtWidgets import (
@@ -17,7 +17,7 @@ from .utils.store import init_db, load_setting
 
 logger = logging.getLogger(__name__)
 
-VERSION = "9.15.1"
+VERSION = "9.16.0"
 
 
 class MainWindow(QMainWindow):
@@ -87,21 +87,6 @@ class MainWindow(QMainWindow):
         topbar_layout = QHBoxLayout(topbar)
         topbar_layout.setContentsMargins(20, 0, 20, 0)
         topbar_layout.setSpacing(8)
-
-        icon_lbl = QLabel()
-        icon = self._load_icon()
-        if not icon.isNull():
-            icon_lbl.setPixmap(icon.pixmap(28, 28))
-        icon_lbl.setFixedSize(28, 28)
-        topbar_layout.addWidget(icon_lbl)
-
-        title_lbl = QLabel("Token接入器")
-        title_lbl.setObjectName("topTitle")
-        topbar_layout.addWidget(title_lbl)
-
-        ver_lbl = QLabel(f"v{VERSION}")
-        ver_lbl.setObjectName("topVersion")
-        topbar_layout.addWidget(ver_lbl)
 
         topbar_layout.addStretch()
 

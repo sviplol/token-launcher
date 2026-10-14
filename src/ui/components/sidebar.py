@@ -81,7 +81,14 @@ class Sidebar(QWidget):
         name = QLabel("Token接入器")
         name.setObjectName("brandName")
         tl.addWidget(name)
-        ver = QLabel("v9.9.8")
+        _ver = "9.15.1"
+        _vf = os.path.join(os.path.dirname(__file__), "..", "..", "VERSION")
+        try:
+            with open(_vf, "r") as _f:
+                _ver = _f.read().strip() or _ver
+        except OSError:
+            pass
+        ver = QLabel(f"v{_ver}")
         ver.setObjectName("brandVer")
         tl.addWidget(ver)
         bl.addWidget(text_box)
